@@ -6,9 +6,9 @@ Run locally:   streamlit run bess_dashboard.py
 Deployed at:   Streamlit Community Cloud
 
 Three data source modes:
-  1. Demo mode     — built-in synthetic data, works instantly
-  2. Google Drive  — downloads real NLR dataset zip via gdown
-  3. Local mode    — paste local folder path (PC use only)
+  1. Demo mode   — built-in synthetic data, works instantly
+  2. NLR URL     — downloads real dataset from official NLR server
+  3. Local mode  — paste local folder path (PC use only)
 
 Dataset: DOI 10.7799/3025227 — NLR Kestrel HPC
 =============================================================================
@@ -24,11 +24,12 @@ import pathlib
 import io
 import zipfile
 import tempfile
+import requests
 import warnings
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SESSION STATE — initialise before everything else
+# SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
 for key, val in {
     "source_mode" : "demo",
@@ -54,9 +55,9 @@ PALETTE = px.colors.qualitative.Plotly
 def get_color(idx): return PALETTE[int(idx) % len(PALETTE)]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE FILE ID
+# OFFICIAL NLR DATASET URL — public, no authentication needed
 # ─────────────────────────────────────────────────────────────────────────────
-GDRIVE_FILE_ID = "1lD6LWo6eKaWutR4q5Gku-bWUG9wkM7pi"
+NLR_URL = "https://data.nlr.gov/system/files/312/1774982010-dataset.zip"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WORKLOAD DEFINITIONS
@@ -74,7 +75,8 @@ WORKLOAD_DEFS = {
         "id_col"    : None,
         "group_col" : "batch_size",
         "group_lbl" : "Batch size",
-        "extra_cols": ["repeat", "elapsed", "peak_power[W]", "mean_power[W]"],
+        "extra_cols": ["repeat", "elapsed",
+                       "peak_power[W]", "mean_power[W]"],
     },
     "inference_online_rate_llama3_70b": {
         "label"     : "⚡ Inference — Online rate (Llama3 70B)",
@@ -111,126 +113,121 @@ def generate_demo_data():
         (16, "stable_diffusion", 0),
     ]
     meta_rows, all_runs = [], []
-
     for idx, (nodes, model, repeat) in enumerate(configs):
         duration_s    = np.random.uniform(4000, 6000)
         n_steps       = int(duration_s / dt)
         time_s        = np.arange(n_steps) * dt
-        peak_per_node = np.random.uniform(2800, 3520)
-        idle_per_node = np.random.uniform(380,  460)
-        peak_total    = peak_per_node * nodes
-        idle_total    = idle_per_node * nodes
+        peak_total    = np.random.uniform(2800, 3520) * nodes
+        idle_total    = np.random.uniform(380,  460)  * nodes
         ramp_steps    = int(30 / dt)
         plateau_end   = n_steps - int(20 / dt)
-
         power = np.zeros(n_steps)
         for i in range(n_steps):
             if i < ramp_steps:
                 frac     = i / ramp_steps
-                power[i] = idle_total + (peak_total - idle_total) * frac
-                power[i] += np.random.normal(0, peak_total * 0.01)
+                power[i] = idle_total + (peak_total-idle_total)*frac
+                power[i] += np.random.normal(0, peak_total*0.01)
             elif i < plateau_end:
                 power[i] = peak_total * np.random.uniform(0.94, 0.99)
             else:
-                frac     = (i - plateau_end) / max(n_steps - plateau_end, 1)
-                power[i] = peak_total * (1 - frac) + idle_total * frac
-                power[i] += np.random.normal(0, peak_total * 0.005)
-
-        power = np.clip(power, idle_total * 0.8, peak_total * 1.02)
-
+                frac     = (i-plateau_end)/max(n_steps-plateau_end,1)
+                power[i] = peak_total*(1-frac)+idle_total*frac
+                power[i] += np.random.normal(0, peak_total*0.005)
+        power = np.clip(power, idle_total*0.8, peak_total*1.02)
         df = pd.DataFrame({
-            "time_s"   : time_s,
-            "power_W"  : power,
-            "group"    : str(nodes),
-            "file_num" : idx,
-            "run_idx"  : idx,
-            "nodes"    : nodes,
-            "model"    : model,
-            "repeat"   : repeat,
+            "time_s"  : time_s, "power_W": power,
+            "group"   : str(nodes), "file_num": idx,
+            "run_idx" : idx, "nodes": nodes,
+            "model"   : model, "repeat": repeat,
         })
         all_runs.append(df)
         meta_rows.append({
-            "Unnamed: 0": idx,
-            "model"      : model,
-            "nodes"      : nodes,
-            "repeat"     : repeat,
-            "path_save"  : f"training/results/{idx:06d}.parquet",
-            "slurmid"    : 10000000 + idx,
+            "Unnamed: 0": idx, "model": model,
+            "nodes": nodes, "repeat": repeat,
+            "path_save": f"training/results/{idx:06d}.parquet",
+            "slurmid": 10000000+idx,
         })
-
     return pd.DataFrame(meta_rows), pd.concat(all_runs, ignore_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE DOWNLOADER — uses gdown to bypass confirmation pages
+# NLR URL DOWNLOADER — direct download, no authentication needed
 # ─────────────────────────────────────────────────────────────────────────────
-def download_from_gdrive(file_id: str) -> pathlib.Path:
+def download_from_url(url: str) -> pathlib.Path:
     """
-    Download large file from Google Drive using gdown.
-    gdown automatically handles virus scan confirmation pages
-    that break normal requests-based downloads.
+    Download zip from any public URL using requests.
+    Works with the official NLR data portal — no authentication.
     """
-    import gdown
-
     tmp = pathlib.Path(tempfile.mkdtemp()) / "nlr_dataset"
     tmp.mkdir(parents=True, exist_ok=True)
     zip_path = tmp / "dataset.zip"
 
-    url = f"https://drive.google.com/uc?id={file_id}"
-
-    st.info(
-        "⬇️  Downloading dataset from Google Drive (~1 GB).\n\n"
-        "This may take 5–15 minutes depending on your connection. "
-        "Please do not close this tab."
-    )
+    prog = st.progress(0, text="⬇️  Connecting to NLR data server …")
 
     try:
-        gdown.download(
-            url    = url,
-            output = str(zip_path),
-            quiet  = False,
+        resp = requests.get(
+            url,
+            stream=True,
+            timeout=300,
+            headers={"User-Agent": "Mozilla/5.0"},
         )
-    except Exception as e:
-        st.error(
-            f"❌  gdown download error: {e}\n\n"
-            "Please check:\n"
-            "1. File is shared as **'Anyone with the link'**\n"
-            "2. Google Drive upload is 100% complete\n"
-            "3. File ID is correct"
-        )
+        resp.raise_for_status()
+
+        total = int(resp.headers.get("content-length", 0))
+        done  = 0
+
+        with open(zip_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = min(done / total, 1.0)
+                    mb  = done  // (1024 * 1024)
+                    tot = total // (1024 * 1024)
+                    prog.progress(
+                        pct,
+                        text=f"⬇️  Downloading … {mb} MB / {tot} MB"
+                    )
+                else:
+                    mb = done // (1024 * 1024)
+                    prog.progress(
+                        0,
+                        text=f"⬇️  Downloading … {mb} MB"
+                    )
+
+        prog.empty()
+
+    except requests.exceptions.RequestException as e:
+        prog.empty()
+        st.error(f"❌  Download failed: {e}")
         return tmp
 
-    # Validate downloaded file
+    # Validate
     if not zip_path.exists():
-        st.error("❌  Download failed — file not found after download.")
+        st.error("❌  Download failed — file not saved.")
         return tmp
 
     size_mb = zip_path.stat().st_size // (1024 * 1024)
-
     if size_mb < 10:
         st.error(
-            f"❌  Downloaded file is too small ({size_mb} MB). "
-            "Google Drive likely returned a login/warning page.\n\n"
-            "Please ensure:\n"
-            "1. File sharing is set to **'Anyone with the link'**\n"
-            "2. Upload to Google Drive is **100% complete**"
+            f"❌  Downloaded file is too small ({size_mb} MB).\n\n"
+            "The server may have returned an error page instead of "
+            "the actual file. Please try again."
         )
         return tmp
 
     st.success(f"✅  Download complete — {size_mb} MB")
 
-    # Extract zip
+    # Extract
     with st.spinner("📦  Extracting zip … (1–2 minutes for 1 GB)"):
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 zf.extractall(tmp)
             st.success("✅  Extraction complete")
         except zipfile.BadZipFile:
-            st.error(
-                "❌  File is not a valid zip.\n\n"
-                "The upload may not be 100% complete. "
-                "Check Google Drive upload status and try again."
-            )
+            st.error("❌  File is not a valid zip. Please try again.")
             return tmp
 
     candidates = [p for p in tmp.rglob("01_aggregated_datasets")
@@ -324,7 +321,8 @@ def load_workload(base_str: str, folder: str, max_files: int = 150):
             continue
 
         raw["group"]    = (str(row[grp_col])
-                           if grp_col in row.index and pd.notna(row.get(grp_col))
+                           if grp_col in row.index
+                           and pd.notna(row.get(grp_col))
                            else "all")
         raw["file_num"] = int(file_num)
         raw["run_idx"]  = i
@@ -379,16 +377,16 @@ def gen_solar(n_steps, dt, pv_kW):
     h = np.arange(n_steps) * dt / 3600
     return np.where(
         (h >= 6) & (h <= 20),
-        pv_kW * np.maximum(0.0, np.sin(np.pi * (h - 6) / 14)), 0.0)
+        pv_kW * np.maximum(0.0, np.sin(np.pi*(h-6)/14)), 0.0)
 
 def sim_soc(net_kW, pwr_kW, e_kWh, rte, dt, lo_pct, hi_pct):
     soc    = np.zeros(len(net_kW))
-    lo, hi = lo_pct / 100 * e_kWh, hi_pct / 100 * e_kWh
+    lo, hi = lo_pct/100*e_kWh, hi_pct/100*e_kWh
     soc[0] = hi
     for i in range(1, len(net_kW)):
         d = min(abs(net_kW[i]), pwr_kW) * dt / 3600
-        soc[i] = (max(soc[i-1] - d / rte, lo) if net_kW[i] > 0
-                  else min(soc[i-1] + d * rte, hi))
+        soc[i] = (max(soc[i-1]-d/rte, lo) if net_kW[i] > 0
+                  else min(soc[i-1]+d*rte, hi))
     return soc / e_kWh * 100
 
 
@@ -427,32 +425,34 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
 
     st.divider()
 
-    # Row 1: time-series + ramp over time
     p1a, p1b = st.columns([2, 1])
     with p1a:
-        win       = max(10, int(30 / dt))
+        win       = max(10, int(30/dt))
         roll_mean = pw.rolling(win, center=True).mean() / 1000
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=time/60, y=pw/1000, mode="lines",
-            name="Power (kW)", line=dict(color="#378ADD", width=1.2),
+            name="Power (kW)",
+            line=dict(color="#378ADD", width=1.2),
         ))
         fig.add_trace(go.Scatter(
             x=time/60, y=roll_mean, mode="lines",
             name=f"Rolling mean ({win*dt:.0f}s)",
             line=dict(color="#E24B4A", width=2, dash="dot"),
         ))
-        fig.add_hline(y=peak_kW, line_dash="dash", line_color="#BA7517",
+        fig.add_hline(y=peak_kW, line_dash="dash",
+                      line_color="#BA7517",
                       annotation_text=f"Peak {peak_kW:.2f} kW",
                       annotation_position="top right")
-        fig.add_hline(y=mean_kW, line_dash="dot", line_color="#1D9E75",
+        fig.add_hline(y=mean_kW, line_dash="dot",
+                      line_color="#1D9E75",
                       annotation_text=f"Mean {mean_kW:.2f} kW",
                       annotation_position="bottom right")
         fig.update_layout(
             title="Power time-series with rolling mean",
             xaxis_title="Time (min)", yaxis_title="Power (kW)",
             height=340, hovermode="x unified",
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -461,20 +461,22 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
             x=time/60, y=ramp_kws, mode="lines",
-            name="Ramp (kW/s)", line=dict(color="#f38ba8", width=0.8),
-            fill="tozeroy", fillcolor="rgba(243,139,168,0.10)",
+            name="Ramp (kW/s)",
+            line=dict(color="#f38ba8", width=0.8),
+            fill="tozeroy",
+            fillcolor="rgba(243,139,168,0.10)",
         ))
-        fig2.add_hline(y=ramp_p95, line_dash="dash", line_color="red",
+        fig2.add_hline(y=ramp_p95, line_dash="dash",
+                       line_color="red",
                        annotation_text=f"95th {ramp_p95:.4f} kW/s")
         fig2.update_layout(
             title="Ramp rate over time",
             xaxis_title="Time (min)", yaxis_title="kW/s",
             height=340, hovermode="x unified",
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Row 2: histogram + cumulative energy + phase pie
     p2a, p2b, p2c = st.columns(3)
     with p2a:
         fig3 = go.Figure()
@@ -482,14 +484,16 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
             x=pw/1000, nbinsx=60,
             marker_color="#378ADD", opacity=0.75,
         ))
-        fig3.add_vline(x=mean_kW, line_dash="dash", line_color="#1D9E75",
+        fig3.add_vline(x=mean_kW, line_dash="dash",
+                       line_color="#1D9E75",
                        annotation_text=f"Mean {mean_kW:.2f} kW")
-        fig3.add_vline(x=peak_kW, line_dash="dash", line_color="#E24B4A",
+        fig3.add_vline(x=peak_kW, line_dash="dash",
+                       line_color="#E24B4A",
                        annotation_text=f"Peak {peak_kW:.2f} kW")
         fig3.update_layout(
             title="Power distribution",
             xaxis_title="Power (kW)", yaxis_title="Count",
-            height=300, margin=dict(l=55, r=15, t=50, b=45),
+            height=300, margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig3, use_container_width=True)
 
@@ -498,14 +502,15 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         fig4 = go.Figure()
         fig4.add_trace(go.Scatter(
             x=time/60, y=cumE, mode="lines",
-            fill="tozeroy", fillcolor="rgba(29,158,117,0.15)",
+            fill="tozeroy",
+            fillcolor="rgba(29,158,117,0.15)",
             line=dict(color="#1D9E75", width=1.5),
         ))
         fig4.update_layout(
             title="Cumulative energy consumed",
             xaxis_title="Time (min)", yaxis_title="kWh",
             height=300, hovermode="x unified",
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig4, use_container_width=True)
 
@@ -519,7 +524,7 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
                   for p in pw.values]
         counts = Counter(phases)
         labels = ["Idle", "Transition", "Plateau"]
-        values = [counts.get(l, 0) * dt for l in labels]
+        values = [counts.get(l,0)*dt for l in labels]
         fig5 = go.Figure(go.Pie(
             labels=labels, values=values,
             marker=dict(colors=["#888780","#BA7517","#E24B4A"]),
@@ -529,28 +534,29 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         fig5.update_layout(
             title="Time in each power phase",
             height=300, showlegend=False,
-            margin=dict(l=15, r=15, t=50, b=15),
+            margin=dict(l=15,r=15,t=50,b=15),
         )
         st.plotly_chart(fig5, use_container_width=True)
 
-    # Row 3: load duration + ramp up/down split
     p3a, p3b = st.columns(2)
     with p3a:
-        sorted_pw = np.sort(pw.values / 1000)[::-1]
-        pct       = np.arange(1, len(sorted_pw)+1) / len(sorted_pw) * 100
+        sorted_pw = np.sort(pw.values/1000)[::-1]
+        pct       = np.arange(1, len(sorted_pw)+1)/len(sorted_pw)*100
         fig6 = go.Figure()
         fig6.add_trace(go.Scatter(
             x=pct, y=sorted_pw, mode="lines",
             line=dict(color="#534AB7", width=2),
-            fill="tozeroy", fillcolor="rgba(83,74,183,0.10)",
+            fill="tozeroy",
+            fillcolor="rgba(83,74,183,0.10)",
         ))
-        fig6.add_hline(y=mean_kW, line_dash="dot", line_color="#1D9E75",
+        fig6.add_hline(y=mean_kW, line_dash="dot",
+                       line_color="#1D9E75",
                        annotation_text=f"Mean {mean_kW:.2f} kW")
         fig6.update_layout(
             title="Load duration curve (this batch)",
             xaxis_title="Duration exceeded (%)",
             yaxis_title="Power (kW)", height=300,
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig6, use_container_width=True)
 
@@ -559,29 +565,32 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         diff_pw    = pw.diff()
         ramp_up    = ramp_kws_s[diff_pw > 0].dropna()
         ramp_down  = ramp_kws_s[diff_pw < 0].dropna()
-        ramp_up    = ramp_up[ramp_up <= ramp_up.quantile(0.999)]
+        ramp_up    = ramp_up[ramp_up   <= ramp_up.quantile(0.999)]
         ramp_down  = ramp_down[ramp_down <= ramp_down.quantile(0.999)]
         fig7 = make_subplots(rows=1, cols=2,
-                             subplot_titles=["Ramp-up", "Ramp-down"])
+                             subplot_titles=["Ramp-up","Ramp-down"])
         fig7.add_trace(go.Histogram(
             x=ramp_up, nbinsx=40,
-            marker_color="#E24B4A", opacity=0.75), row=1, col=1)
+            marker_color="#E24B4A", opacity=0.75),
+            row=1, col=1)
         fig7.add_trace(go.Histogram(
             x=ramp_down, nbinsx=40,
-            marker_color="#378ADD", opacity=0.75), row=1, col=2)
+            marker_color="#378ADD", opacity=0.75),
+            row=1, col=2)
         fig7.update_layout(
             title_text="Ramp-up vs ramp-down",
             height=300, showlegend=False,
-            margin=dict(l=40, r=15, t=60, b=45),
+            margin=dict(l=40,r=15,t=60,b=45),
         )
         fig7.update_xaxes(title_text="kW/s")
         fig7.update_yaxes(title_text="Count", col=1)
         st.plotly_chart(fig7, use_container_width=True)
 
     if meta_row is not None:
-        with st.expander("📋  Full metadata for this batch", expanded=False):
+        with st.expander("📋  Full metadata for this batch",
+                         expanded=False):
             st.dataframe(
-                pd.DataFrame([meta_row]).T.rename(columns={0: "Value"}),
+                pd.DataFrame([meta_row]).T.rename(columns={0:"Value"}),
                 use_container_width=True,
             )
 
@@ -597,26 +606,26 @@ with st.sidebar:
     st.markdown("**Step 1 — Data source**")
     source_mode = st.radio(
         "Choose data source",
-        options=["demo", "gdrive", "local"],
+        options=["demo", "nlr", "local"],
         format_func=lambda x: {
-            "demo"  : "🎯 Demo mode (synthetic — instant)",
-            "gdrive": "☁️  Google Drive (real NLR dataset)",
-            "local" : "💾 Local folder (your PC only)",
+            "demo" : "🎯 Demo mode (synthetic — instant)",
+            "nlr"  : "🌐 NLR dataset (official download ~1 GB)",
+            "local": "💾 Local folder (your PC only)",
         }[x],
-        index=["demo","gdrive","local"].index(
+        index=["demo","nlr","local"].index(
             st.session_state["source_mode"]),
     )
     st.session_state["source_mode"] = source_mode
 
-    # Demo
+    # ── Demo ──────────────────────────────────────────────────────────────────
     if source_mode == "demo":
         st.info(
-            "Synthetic H100 power profiles — mirrors real NLR "
-            "measurements. Works instantly on Streamlit Cloud."
+            "Synthetic H100 power profiles that mirror real "
+            "NLR measurements. Works instantly."
         )
         if st.button("▶️  Load demo data", type="primary",
                      use_container_width=True):
-            with st.spinner("Generating synthetic profiles …"):
+            with st.spinner("Generating …"):
                 meta, data = generate_demo_data()
             st.session_state["wl_cache"]["demo"] = {
                 "meta": meta, "data": data,
@@ -625,35 +634,42 @@ with st.sidebar:
             st.session_state["demo_loaded"] = True
             st.success("✅  Demo data ready")
 
-    # Google Drive
-    elif source_mode == "gdrive":
-        st.markdown("**Google Drive dataset**")
+    # ── NLR official URL ──────────────────────────────────────────────────────
+    elif source_mode == "nlr":
+        st.markdown("**Official NLR dataset**")
         st.info(
-            f"File ID: `{GDRIVE_FILE_ID[:20]}…`\n\n"
-            "Click below to download and extract (~1 GB).\n\n"
-            "⚠️  Make sure upload to Google Drive is **100% complete** "
-            "and file is shared as **'Anyone with the link'** before clicking."
+            "Downloads directly from the NLR data portal.\n\n"
+            "**No authentication needed** — publicly available.\n\n"
+            "⚠️  File size ~1 GB. Download takes 5–20 minutes "
+            "depending on connection speed."
         )
-        if st.button("☁️  Download from Google Drive",
+        custom_url = st.text_input(
+            "Download URL (pre-filled with official NLR URL)",
+            value=NLR_URL,
+        )
+        if st.button("⬇️  Download NLR dataset",
                      type="primary", use_container_width=True):
             try:
-                base  = download_from_gdrive(GDRIVE_FILE_ID)
+                base  = download_from_url(custom_url.strip())
                 found = scan_workloads(str(base))
                 if found:
                     st.session_state["base"]     = str(base)
                     st.session_state["wl_found"] = found
                     st.session_state["wl_cache"] = {}
-                    st.success(f"✅  {len(found)} workload(s) ready to load")
+                    st.success(
+                        f"✅  {len(found)} workload(s) found. "
+                        "Select one below."
+                    )
                 else:
                     st.error(
-                        "❌  Dataset extracted but no workloads found.\n\n"
-                        "Check that the zip contains "
+                        "❌  No workloads found after extraction.\n\n"
+                        "The zip may not contain "
                         "`01_aggregated_datasets/` folder."
                     )
             except Exception as e:
                 st.error(f"❌  Error: {e}")
 
-    # Local
+    # ── Local ─────────────────────────────────────────────────────────────────
     else:
         st.markdown("**Local folder path**")
         local_path = st.text_input(
@@ -671,10 +687,10 @@ with st.sidebar:
             else:
                 st.error("❌  No workloads found — check path")
 
-    # Workload selector
+    # ── Workload selector ─────────────────────────────────────────────────────
     wl_found = st.session_state.get("wl_found", {})
-    is_demo  = (source_mode == "demo" and
-                st.session_state.get("demo_loaded"))
+    is_demo  = (source_mode == "demo"
+                and st.session_state.get("demo_loaded"))
 
     if not is_demo and wl_found:
         st.divider()
@@ -689,7 +705,8 @@ with st.sidebar:
                      use_container_width=True):
             with st.spinner("Loading parquet files …"):
                 meta, data = load_workload(
-                    st.session_state["base"], folder_name, max_files)
+                    st.session_state["base"],
+                    folder_name, max_files)
             if data is not None:
                 st.session_state["wl_cache"][folder_name] = {
                     "meta": meta, "data": data,
@@ -698,9 +715,9 @@ with st.sidebar:
                 st.success("✅  Loaded")
     elif not is_demo and not wl_found:
         if source_mode != "demo":
-            st.info("Load data first using the button above.")
+            st.info("Download / scan data first using the button above.")
 
-    # BESS parameters
+    # ── BESS parameters ───────────────────────────────────────────────────────
     st.divider()
     st.markdown("**Step 3 — Facility & BESS**")
     facility_nodes = st.slider("Total GPU nodes",        10,  500, 156, 10)
@@ -729,19 +746,19 @@ elif wl_found:
 if not active_key:
     st.title("⚡ BESS Engineering Dashboard")
     st.markdown("""
-    ### Welcome — NLR GenAI Power Profiles BESS Analysis
+### Welcome — NLR GenAI Power Profiles BESS Analysis
 
-    Analyse AI workload power profiles from the **NLR Kestrel HPC** dataset
-    (DOI: 10.7799/3025227) and compute BESS engineering parameters for
-    grid integration with renewables.
+Analyse AI workload power profiles from the **NLR Kestrel HPC**
+dataset (DOI: 10.7799/3025227) and compute BESS engineering
+parameters for grid integration with renewables.
 
-    **Get started — choose a data source in the sidebar ←**
+**Get started — choose a data source in the sidebar ←**
 
-    | Mode | Description | Speed |
-    |---|---|---|
-    | 🎯 Demo | Synthetic H100 profiles | Instant |
-    | ☁️ Google Drive | Real NLR dataset (~1 GB) | 5–15 min |
-    | 💾 Local | Your extracted folder | Instant (PC only) |
+| Mode | Description | Speed |
+|---|---|---|
+| 🎯 Demo | Synthetic H100 profiles | Instant |
+| 🌐 NLR dataset | Official public download (~1 GB) | 5–20 min |
+| 💾 Local | Your extracted folder (PC only) | Instant |
     """)
     st.stop()
 
@@ -782,7 +799,7 @@ rep_run   = (data[data["file_num"] == top_idx]
              .sort_values("time_s").reset_index(drop=True))
 if "nodes" in rep_run.columns:
     try: rep_nodes = int(rep_run["nodes"].iloc[0])
-    except: rep_nodes = 1
+    except: pass
 
 scale        = facility_nodes / max(rep_nodes, 1)
 fac_peak_kW  = peak_W / 1000 * scale * pue
@@ -803,7 +820,7 @@ rl      = rep_run["power_W"].values / 1000 * scale * pue
 for sh in job_hrs:
     si = int(sh * 3600 / dt)
     ei = min(si + len(rl), n24)
-    load_24[si:ei] = rl[:ei - si]
+    load_24[si:ei] = rl[:ei-si]
 
 solar_kW    = gen_solar(n24, dt, fac_peak_kW * solar_frac / 100)
 net_kW      = load_24 - solar_kW
@@ -812,23 +829,23 @@ soc_arr     = sim_soc(net_kW, bess_pwr_kW, bess_e_kWh,
 deficit_kWh = float(np.sum(net_kW.clip(min=0)) * dt / 3600)
 surplus_kWh = float(np.sum((-net_kW).clip(min=0)) * dt / 3600)
 total_kWh   = float(np.sum(load_24) * dt / 3600)
-re_pct      = max(0.0, (1 - deficit_kWh / max(total_kWh, 1e-9)) * 100)
+re_pct      = max(0.0, (1 - deficit_kWh/max(total_kWh,1e-9))*100)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HEADER + KPIs
 # ─────────────────────────────────────────────────────────────────────────────
-mode_badge = "🎯 Demo" if is_demo else f"☁️ Real NLR data"
+mode_badge = "🎯 Demo" if is_demo else "🌐 Real NLR data"
 st.title("⚡ BESS Engineering Dashboard")
 st.caption(
     f"{mode_badge}  |  {data['file_num'].nunique()} runs  |  "
-    f"dt={dt:.2f}s  |  {facility_nodes} nodes | PUE {pue} | "
-    f"{solar_frac}% solar"
+    f"dt={dt:.2f}s  |  {facility_nodes} nodes | "
+    f"PUE {pue} | {solar_frac}% solar"
 )
 
 if is_demo:
     st.info(
         "🎯 **Demo mode** — synthetic data. "
-        "Switch to **Google Drive** in the sidebar for real NLR data."
+        "Switch to **NLR dataset** in the sidebar for real data."
     )
 
 with st.expander("📋  Metadata (first 10 rows)", expanded=False):
@@ -869,7 +886,7 @@ with tab1:
     for g in groups:
         col_g = grp_colors[g]
         shown = False
-        for fidx, run in data[data["group"] == g].groupby("file_num"):
+        for fidx, run in data[data["group"]==g].groupby("file_num"):
             rs = run.sort_values("time_s")
             fig_all.add_trace(go.Scatter(
                 x=rs["time_s"]/60, y=rs["power_W"]/1000,
@@ -885,7 +902,7 @@ with tab1:
         xaxis_title="Time (min)", yaxis_title="Power (kW)",
         height=420, hovermode="x unified",
         legend=dict(title=grp_lbl, font=dict(size=10)),
-        margin=dict(l=55, r=15, t=20, b=45),
+        margin=dict(l=55,r=15,t=20,b=45),
     )
     st.plotly_chart(fig_all, use_container_width=True)
 
@@ -894,8 +911,8 @@ with tab1:
         fig_ldc = go.Figure()
         for g in groups:
             pwr = np.sort(
-                data[data["group"] == g]["power_W"].values/1000)[::-1]
-            pct = np.arange(1, len(pwr)+1)/len(pwr)*100
+                data[data["group"]==g]["power_W"].values/1000)[::-1]
+            pct = np.arange(1,len(pwr)+1)/len(pwr)*100
             fig_ldc.add_trace(go.Scatter(
                 x=pct, y=pwr, mode="lines",
                 name=f"{grp_lbl}={g}",
@@ -905,14 +922,14 @@ with tab1:
             title="Load duration curve — all batches",
             xaxis_title="Time power exceeded (%)",
             yaxis_title="Power (kW)", height=350,
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_ldc, use_container_width=True)
 
     with r2b:
         fig_ramp = go.Figure()
         for g in groups:
-            ramps = (data[data["group"] == g]
+            ramps = (data[data["group"]==g]
                      .groupby("file_num")["power_W"]
                      .diff().abs().div(dt).dropna()/1000)
             ramps = ramps[ramps <= ramps.quantile(0.999)]
@@ -930,7 +947,7 @@ with tab1:
             title="Ramp rate distribution — all batches",
             xaxis_title="kW/s", yaxis_title="Count",
             barmode="overlay", height=350,
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_ramp, use_container_width=True)
 
@@ -940,14 +957,14 @@ with tab1:
         fig_box = go.Figure()
         for g in groups:
             fig_box.add_trace(go.Box(
-                y=data[data["group"] == g]["power_W"]/1000,
+                y=data[data["group"]==g]["power_W"]/1000,
                 name=str(g), marker_color=grp_colors[g],
                 boxmean=True, showlegend=False,
             ))
         fig_box.update_layout(
             title=f"Power distribution by {grp_lbl}",
             xaxis_title=grp_lbl, yaxis_title="Power (kW)",
-            height=320, margin=dict(l=55, r=15, t=50, b=45),
+            height=320, margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_box, use_container_width=True)
 
@@ -964,7 +981,7 @@ with tab1:
             title=f"Peak / mean / idle by {grp_lbl}",
             xaxis_title=grp_lbl, yaxis_title="Power (kW)",
             barmode="group", height=320,
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -975,8 +992,10 @@ with tab1:
         fig_lf.add_trace(go.Bar(
             x=lf_agg["Group"].astype(str),
             y=lf_agg["mean"].round(1),
-            error_y=dict(type="data", array=lf_agg["std"].round(1)),
-            marker_color=[grp_colors[g] for g in lf_agg["Group"]],
+            error_y=dict(type="data",
+                         array=lf_agg["std"].round(1)),
+            marker_color=[grp_colors[g]
+                          for g in lf_agg["Group"]],
             text=lf_agg["mean"].round(1).astype(str)+"%",
             textposition="outside",
         ))
@@ -984,7 +1003,7 @@ with tab1:
             title=f"Load factor by {grp_lbl}",
             xaxis_title=grp_lbl, yaxis_title="LF (%)",
             yaxis=dict(range=[0,115]), height=320,
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_lf, use_container_width=True)
 
@@ -1008,7 +1027,8 @@ with tab2:
     sel_c1, sel_c2, sel_c3 = st.columns([1, 1, 2])
     with sel_c1:
         grp_options = ["All groups"] + [str(g) for g in groups]
-        sel_group   = st.selectbox(f"Filter by {grp_lbl}", grp_options)
+        sel_group   = st.selectbox(f"Filter by {grp_lbl}",
+                                   grp_options)
 
     avail = (data[["file_num","group"]].drop_duplicates()
              if sel_group == "All groups"
@@ -1038,7 +1058,8 @@ with tab2:
     st.divider()
     sel_run = (data[data["file_num"] == sel_file]
                .sort_values("time_s").reset_index(drop=True))
-    sel_grp_val = sel_run["group"].iloc[0] if len(sel_run) > 0 else "?"
+    sel_grp_val = (sel_run["group"].iloc[0]
+                   if len(sel_run) > 0 else "?")
 
     meta_row = None
     try:
@@ -1046,7 +1067,8 @@ with tab2:
         if wl_id_col and wl_id_col in meta.columns:
             mm = meta[meta[wl_id_col].astype(int) == sel_file]
         else:
-            mm = meta.iloc[[sel_file]] if sel_file < len(meta) else None
+            mm = (meta.iloc[[sel_file]]
+                  if sel_file < len(meta) else None)
         if mm is not None and len(mm) > 0:
             meta_row = mm.iloc[0]
     except Exception:
@@ -1062,7 +1084,9 @@ with tab2:
 # TAB 3 — BESS SIZING
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown("### 🔋 Facility-level BESS sizing & renewable integration")
+    st.markdown(
+        "### 🔋 Facility-level BESS sizing & renewable integration"
+    )
 
     fig_24 = go.Figure()
     fig_24.add_trace(go.Scatter(
@@ -1090,48 +1114,56 @@ with tab3:
     ))
     for sh in job_hrs:
         fig_24.add_vline(x=sh, line_dash="dot",
-                         line_color="gray", line_width=0.8, opacity=0.5)
+                         line_color="gray",
+                         line_width=0.8, opacity=0.5)
     fig_24.update_layout(
         title=(f"RE coverage: {re_pct:.1f}%  |  "
                f"Firming gap: {deficit_kWh:.0f} kWh  |  "
                f"RE surplus: {surplus_kWh:.0f} kWh"),
-        xaxis_title="Hour of day", yaxis_title="Power (MW)",
+        xaxis_title="Hour of day",
+        yaxis_title="Power (MW)",
         height=380, hovermode="x unified",
         xaxis=dict(range=[0,24], dtick=2),
-        margin=dict(l=55, r=15, t=55, b=45),
+        margin=dict(l=55,r=15,t=55,b=45),
     )
     st.plotly_chart(fig_24, use_container_width=True)
 
     c_soc, c_spec = st.columns([2, 1])
     with c_soc:
         fig_soc = go.Figure()
-        fig_soc.add_hrect(y0=soc_min, y1=soc_max,
-                          fillcolor="rgba(166,227,161,0.07)", line_width=0)
+        fig_soc.add_hrect(
+            y0=soc_min, y1=soc_max,
+            fillcolor="rgba(166,227,161,0.07)", line_width=0)
         fig_soc.add_trace(go.Scatter(
             x=t24, y=soc_arr,
-            fill="tozeroy", fillcolor="rgba(186,117,23,0.20)",
-            line=dict(color="#BA7517", width=2), name="BESS SoC (%)",
-            hovertemplate="Hour %{x:.1f} | SoC %{y:.1f}%<extra></extra>",
+            fill="tozeroy",
+            fillcolor="rgba(186,117,23,0.20)",
+            line=dict(color="#BA7517", width=2),
+            name="BESS SoC (%)",
+            hovertemplate=(
+                "Hour %{x:.1f} | SoC %{y:.1f}%<extra></extra>"),
         ))
-        fig_soc.add_hline(y=soc_min, line_dash="dash",
-                          line_color="#f38ba8",
-                          annotation_text=f"Min {soc_min}%",
-                          annotation_position="bottom right")
-        fig_soc.add_hline(y=soc_max, line_dash="dash",
-                          line_color="#a6e3a1",
-                          annotation_text=f"Max {soc_max}%",
-                          annotation_position="top right")
+        fig_soc.add_hline(
+            y=soc_min, line_dash="dash", line_color="#f38ba8",
+            annotation_text=f"Min {soc_min}%",
+            annotation_position="bottom right")
+        fig_soc.add_hline(
+            y=soc_max, line_dash="dash", line_color="#a6e3a1",
+            annotation_text=f"Max {soc_max}%",
+            annotation_position="top right")
         for sh in job_hrs:
             fig_soc.add_vline(x=sh, line_dash="dot",
-                              line_color="gray", line_width=0.8, opacity=0.5)
+                              line_color="gray",
+                              line_width=0.8, opacity=0.5)
         fig_soc.update_layout(
             title=(f"BESS SoC — {bess_e_MWh:.2f} MWh | "
                    f"{bess_pwr_MW:.2f} MW | RTE {rte:.0%}"),
-            xaxis_title="Hour of day", yaxis_title="SoC (%)",
+            xaxis_title="Hour of day",
+            yaxis_title="SoC (%)",
             yaxis=dict(range=[0,105]),
             xaxis=dict(range=[0,24], dtick=2),
             height=360, hovermode="x unified",
-            margin=dict(l=55, r=15, t=55, b=45),
+            margin=dict(l=55,r=15,t=55,b=45),
         )
         st.plotly_chart(fig_soc, use_container_width=True)
 
@@ -1167,7 +1199,8 @@ with tab3:
             else:
                 ca, cb = st.columns([3, 2])
                 ca.markdown(
-                    f"<span style='color:gray;font-size:12px'>{k}</span>",
+                    f"<span style='color:gray;"
+                    f"font-size:12px'>{k}</span>",
                     unsafe_allow_html=True)
                 cb.markdown(f"**{v}**")
 
@@ -1196,7 +1229,7 @@ with tab4:
     else:
         fig_cmp = go.Figure()
         for i, fn in enumerate(sel_files):
-            run = data[data["file_num"] == fn].sort_values("time_s")
+            run = data[data["file_num"]==fn].sort_values("time_s")
             grp = run["group"].iloc[0]
             fig_cmp.add_trace(go.Scatter(
                 x=run["time_s"]/60, y=run["power_W"]/1000,
@@ -1205,13 +1238,14 @@ with tab4:
                 line=dict(color=get_color(i), width=1.5),
                 hovertemplate=(
                     f"File {fn} | {grp_lbl}={grp}<br>"
-                    "t=%{x:.1f} min | %{y:.2f} kW<extra></extra>"),
+                    "t=%{x:.1f} min | "
+                    "%{y:.2f} kW<extra></extra>"),
             ))
         fig_cmp.update_layout(
             title="Power time-series — selected batches overlaid",
             xaxis_title="Time (min)", yaxis_title="Power (kW)",
             height=380, hovermode="x unified",
-            margin=dict(l=55, r=15, t=50, b=45),
+            margin=dict(l=55,r=15,t=50,b=45),
         )
         st.plotly_chart(fig_cmp, use_container_width=True)
 
@@ -1219,10 +1253,10 @@ with tab4:
         with cmp_a:
             fig_ldc2 = go.Figure()
             for i, fn in enumerate(sel_files):
-                run = data[data["file_num"] == fn]
+                run = data[data["file_num"]==fn]
                 grp = run["group"].iloc[0]
                 pwr = np.sort(run["power_W"].values/1000)[::-1]
-                pct = np.arange(1, len(pwr)+1)/len(pwr)*100
+                pct = np.arange(1,len(pwr)+1)/len(pwr)*100
                 fig_ldc2.add_trace(go.Scatter(
                     x=pct, y=pwr, mode="lines",
                     name=f"File {fn} | {grp_lbl}={grp}",
@@ -1232,14 +1266,16 @@ with tab4:
                 title="Load duration curves",
                 xaxis_title="Duration exceeded (%)",
                 yaxis_title="Power (kW)", height=340,
-                margin=dict(l=55, r=15, t=50, b=45),
+                margin=dict(l=55,r=15,t=50,b=45),
             )
             st.plotly_chart(fig_ldc2, use_container_width=True)
 
         with cmp_b:
-            cmp_stats = stats_df[stats_df["File #"].isin(sel_files)].copy()
-            metrics   = ["Peak (kW)","Mean (kW)","LF (%)","Ramp 95pc (kW/s)"]
-            fig_cmp2  = go.Figure()
+            cmp_stats = stats_df[
+                stats_df["File #"].isin(sel_files)].copy()
+            metrics  = ["Peak (kW)","Mean (kW)",
+                        "LF (%)","Ramp 95pc (kW/s)"]
+            fig_cmp2 = go.Figure()
             for i, row in cmp_stats.iterrows():
                 fn = int(row["File #"])
                 fig_cmp2.add_trace(go.Bar(
@@ -1252,7 +1288,7 @@ with tab4:
                 title="Key metrics comparison",
                 barmode="group", height=340,
                 yaxis_title="Value",
-                margin=dict(l=55, r=15, t=50, b=45),
+                margin=dict(l=55,r=15,t=50,b=45),
             )
             st.plotly_chart(fig_cmp2, use_container_width=True)
 
@@ -1269,6 +1305,7 @@ st.divider()
 st.caption(
     "Dataset: Vercellino et al. (2026) — NLR/OT-2C00-99122 — "
     "DOI 10.7799/3025227  |  "
-    "Solar: synthetic (sinusoidal) — replace with NSRDB for Golden, CO  |  "
-    "BESS sizing is indicative — full power system study required for final design"
+    "Solar: synthetic (sinusoidal) — replace with NSRDB for "
+    "Golden, CO  |  "
+    "BESS sizing indicative — full power system study required"
 )
