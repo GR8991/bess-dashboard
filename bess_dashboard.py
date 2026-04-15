@@ -167,110 +167,64 @@ def generate_demo_data():
 # ─────────────────────────────────────────────────────────────────────────────
 def download_from_gdrive(file_id: str) -> pathlib.Path:
     """
-    Download a large file from Google Drive, bypassing the virus-scan
-    confirmation page that Google shows for files > 100 MB.
-    Returns path to the extracted dataset root folder.
+    Download large file from Google Drive using gdown.
+    gdown automatically handles virus scan confirmation pages
+    that break normal requests-based downloads.
     """
-    import requests
-    import re
+    import gdown
 
     tmp = pathlib.Path(tempfile.mkdtemp()) / "nlr_dataset"
     tmp.mkdir(parents=True, exist_ok=True)
 
-    session  = requests.Session()
-    base_url = "https://drive.google.com/uc?export=download"
-    url      = f"{base_url}&id={file_id}"
+    zip_path = tmp / "dataset.zip"
+    url      = f"https://drive.google.com/uc?id={file_id}"
 
     prog = st.progress(0, text="⬇️  Connecting to Google Drive …")
 
-    # ── First request — detect confirmation page ──────────────────────────────
-    resp = session.get(url, stream=True, timeout=60)
-    resp.raise_for_status()
+    try:
+        # gdown handles all confirmation tokens automatically
+        st.info("⬇️  Downloading dataset from Google Drive … (~1 GB, please wait)")
 
-    content_type = resp.headers.get("Content-Type", "")
-
-    if "text/html" in content_type:
-        # Google Drive large-file warning page — extract confirmation
-        html = resp.content.decode("utf-8", errors="ignore")
-
-        # Method 1: confirm= token
-        token_m = re.search(r'confirm=([0-9A-Za-z_\-]+)', html)
-        # Method 2: uuid= token (newer Google Drive)
-        uuid_m  = re.search(r'"uuid":"([^"]+)"', html)
-        # Method 3: download_warning cookie token
-        cookie_token = None
-        for k, v in session.cookies.items():
-            if "download_warning" in k:
-                cookie_token = v
-                break
-
-        if uuid_m:
-            uuid         = uuid_m.group(1)
-            download_url = (
-                f"https://drive.usercontent.google.com/download"
-                f"?id={file_id}&export=download&authuser=0"
-                f"&confirm=t&uuid={uuid}"
-            )
-        elif token_m:
-            token        = token_m.group(1)
-            download_url = f"{base_url}&id={file_id}&confirm={token}"
-        elif cookie_token:
-            download_url = f"{base_url}&id={file_id}&confirm={cookie_token}"
-        else:
-            # Final fallback — usercontent domain
-            download_url = (
-                f"https://drive.usercontent.google.com/download"
-                f"?id={file_id}&export=download&confirm=t"
-            )
-
-        prog.progress(0, text="⬇️  Starting large file download …")
-        resp = session.get(download_url, stream=True, timeout=600)
-        resp.raise_for_status()
-
-    # ── Stream download with progress ─────────────────────────────────────────
-    total = int(resp.headers.get("content-length", 0))
-    buf   = io.BytesIO()
-    done  = 0
-
-    for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):  # 4 MB chunks
-        if not chunk:
-            continue
-        buf.write(chunk)
-        done += len(chunk)
-        if total:
-            pct = min(done / total, 1.0)
-            mb  = done  // (1024 * 1024)
-            tot = total // (1024 * 1024)
-            prog.progress(pct,
-                          text=f"⬇️  Downloading … {mb} MB / {tot} MB")
-        else:
-            mb = done // (1024 * 1024)
-            prog.progress(0, text=f"⬇️  Downloading … {mb} MB")
-
-    prog.empty()
-    st.success(f"✅  Download complete — {done // (1024*1024)} MB")
-
-    # ── Validate and extract zip ───────────────────────────────────────────────
-    buf.seek(0)
-    header = buf.read(4)
-    buf.seek(0)
-
-    if header != b'PK\x03\x04':
-        st.error(
-            "❌  Downloaded file is not a valid zip file.\n\n"
-            "This usually means Google Drive returned a warning/login page "
-            "instead of the file. Please check:\n"
-            "1. The file is shared as **'Anyone with the link'**\n"
-            "2. The file ID is correct\n"
-            "3. Try opening the link in your browser first to confirm it works"
+        gdown.download(
+            url      = url,
+            output   = str(zip_path),
+            quiet    = False,
+            fuzzy    = True,
         )
+
+        prog.empty()
+
+        if not zip_path.exists() or zip_path.stat().st_size < 1000:
+            st.error(
+                "❌  Download failed or file too small.\n\n"
+                "Please check:\n"
+                "1. File is shared as **'Anyone with the link'**\n"
+                "2. File ID is correct\n"
+                "3. Upload to Google Drive is 100% complete"
+            )
+            return tmp
+
+        size_mb = zip_path.stat().st_size // (1024 * 1024)
+        st.success(f"✅  Download complete — {size_mb} MB")
+
+    except Exception as e:
+        prog.empty()
+        st.error(f"❌  gdown error: {e}")
         return tmp
 
-    with st.spinner("📦  Extracting zip … (may take 1–2 minutes for 1 GB)"):
-        with zipfile.ZipFile(buf) as zf:
-            zf.extractall(tmp)
-
-    st.success("✅  Extraction complete")
+    # Extract zip
+    with st.spinner("📦  Extracting zip … (1–2 minutes for 1 GB)"):
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp)
+            st.success("✅  Extraction complete")
+        except zipfile.BadZipFile:
+            st.error(
+                "❌  File is not a valid zip.\n\n"
+                "The upload may not be 100% complete yet. "
+                "Check Google Drive upload status."
+            )
+            return tmp
 
     candidates = [p for p in tmp.rglob("01_aggregated_datasets")
                   if p.is_dir()]
