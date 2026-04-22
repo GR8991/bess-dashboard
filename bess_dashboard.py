@@ -385,17 +385,17 @@ with tab4:
             fig_cmp.add_trace(go.Scatter(x=run["time_s"]/60, y=run["power_W"]/1000, mode="lines", name=f"File {fn}"))
         fig_cmp.update_layout(height=380, title="Batch comparison")
         st.plotly_chart(fig_cmp, use_container_width=True)'''
-"""
-=============================================================================
-BESS Engineering Dashboard — NLR GenAI Power Profiles
-=============================================================================
-Run:  streamlit run bess_dashboard.py --server.maxMessageSize 1000
 
-Tabs: All batches | Single batch | Node deep-dive | BESS sizing | Comparison
-Data: Demo (instant) | NLR URL (~1 GB) | Local folder
-Dataset: DOI 10.7799/3025227 — NLR Kestrel HPC
-=============================================================================
-"""
+#=============================================================================
+#BESS Engineering Dashboard — NLR GenAI Power Profiles
+#=============================================================================
+#Run:  streamlit run bess_dashboard.py --server.maxMessageSize 1000
+
+#Tabs: All batches | Single batch | Node deep-dive | BESS sizing | Comparison
+#Data: Demo (instant) | NLR URL (~1 GB) | Local folder
+#Dataset: DOI 10.7799/3025227 — NLR Kestrel HPC
+#=============================================================================
+
 
 # ── standard library ─────────────────────────────────────────────────────────
 import io
