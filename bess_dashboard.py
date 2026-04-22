@@ -162,13 +162,15 @@ def generate_demo_data():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE DOWNLOADER
+# GOOGLE DRIVE DOWNLOADER (RESTORED ORIGINAL)
 # ─────────────────────────────────────────────────────────────────────────────
 def download_from_gdrive(file_id: str) -> pathlib.Path:
     import gdown
+
     tmp = pathlib.Path(tempfile.mkdtemp()) / "nlr_dataset"
     tmp.mkdir(parents=True, exist_ok=True)
     zip_path = tmp / "dataset.zip"
+
     url = f"https://drive.google.com/uc?id={file_id}"
 
     st.info(
@@ -178,9 +180,19 @@ def download_from_gdrive(file_id: str) -> pathlib.Path:
     )
 
     try:
-        gdown.download(url=url, output=str(zip_path), quiet=False)
+        gdown.download(
+            url    = url,
+            output = str(zip_path),
+            quiet  = False,
+        )
     except Exception as e:
-        st.error(f"❌  gdown download error: {e}")
+        st.error(
+            f"❌  gdown download error: {e}\n\n"
+            "Please check:\n"
+            "1. File is shared as **'Anyone with the link'**\n"
+            "2. Google Drive upload is 100% complete\n"
+            "3. File ID is correct"
+        )
         return tmp
 
     if not zip_path.exists():
@@ -188,8 +200,15 @@ def download_from_gdrive(file_id: str) -> pathlib.Path:
         return tmp
 
     size_mb = zip_path.stat().st_size // (1024 * 1024)
+
     if size_mb < 10:
-        st.error(f"❌  Downloaded file is too small ({size_mb} MB).")
+        st.error(
+            f"❌  Downloaded file is too small ({size_mb} MB). "
+            "Google Drive likely returned a login/warning page.\n\n"
+            "Please ensure:\n"
+            "1. File sharing is set to **'Anyone with the link'**\n"
+            "2. Upload to Google Drive is **100% complete**"
+        )
         return tmp
 
     st.success(f"✅  Download complete — {size_mb} MB")
@@ -200,24 +219,31 @@ def download_from_gdrive(file_id: str) -> pathlib.Path:
                 zf.extractall(tmp)
             st.success("✅  Extraction complete")
         except zipfile.BadZipFile:
-            st.error("❌  File is not a valid zip.")
+            st.error(
+                "❌  File is not a valid zip.\n\n"
+                "The upload may not be 100% complete. "
+                "Check Google Drive upload status and try again."
+            )
             return tmp
 
-    candidates = [p for p in tmp.rglob("01_aggregated_datasets") if p.is_dir()]
+    candidates = [p for p in tmp.rglob("01_aggregated_datasets")
+                  if p.is_dir()]
     return candidates[0].parent if candidates else tmp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCAN & LOAD WORKLOADS
+# SCAN & LOAD WORKLOADS (RESTORED ORIGINAL)
 # ─────────────────────────────────────────────────────────────────────────────
 def scan_workloads(base_str: str) -> dict:
     base    = pathlib.Path(base_str)
     agg_dir = base / "01_aggregated_datasets"
     found   = {}
-    if not agg_dir.exists(): return found
+    if not agg_dir.exists():
+        return found
     for folder in sorted(agg_dir.iterdir()):
-        if not folder.is_dir(): continue
-        results = folder / "results"
+        if not folder.is_dir():
+            continue
+        results  = folder / "results"
         parquets = list(results.glob("*.parquet")) if results.exists() else []
         if parquets and folder.name in WORKLOAD_DEFS:
             found[folder.name] = WORKLOAD_DEFS[folder.name]["label"]
@@ -234,44 +260,62 @@ def load_workload(base_str: str, folder: str, max_files: int = 150):
     meta = None
     for fname in ["metadata.csv", "metadata", "metadata.xlsx"]:
         mp = wl_dir / fname
-        if not mp.exists(): continue
+        if not mp.exists():
+            continue
         try:
-            meta = (pd.read_excel(mp) if mp.suffix == ".xlsx" else pd.read_csv(mp))
+            meta = (pd.read_excel(mp) if mp.suffix == ".xlsx"
+                    else pd.read_csv(mp))
             break
-        except Exception: pass
+        except Exception as e:
+            st.warning(f"metadata error ({fname}): {e}")
+            
     if meta is None:
         st.error(f"❌  Cannot read metadata in {wl_dir}")
         return None, None
 
     if id_col and id_col in meta.columns:
-        pairs = list(zip(meta[id_col].astype(int).tolist(), [row for _, row in meta.iterrows()]))
+        pairs = list(zip(meta[id_col].astype(int).tolist(),
+                         [row for _, row in meta.iterrows()]))
     else:
-        pairs = list(zip(range(len(meta)), [row for _, row in meta.iterrows()]))
+        pairs = list(zip(range(len(meta)),
+                         [row for _, row in meta.iterrows()]))
 
     n_total = len(pairs)
     if n_total > max_files:
         step  = max(1, n_total // max_files)
         pairs = pairs[::step][:max_files]
+        st.info(
+            f"ℹ️  {n_total} runs available — loading {len(pairs)} "
+            f"(every {step}th). Raise 'Max runs' slider for more."
+        )
 
-    runs, missing, errors = [], 0, 0
-    bar = st.progress(0, text="Loading parquet files …")
+    runs    = []
+    missing = 0
+    errors  = 0
+    bar     = st.progress(0, text="Loading parquet files …")
 
     for i, (file_num, row) in enumerate(pairs):
         fpath = results / f"{int(file_num):06d}.parquet"
         if not fpath.exists():
-            missing += 1; continue
-        try: raw = pd.read_parquet(fpath)
+            missing += 1
+            continue
+        try:
+            raw = pd.read_parquet(fpath)
         except Exception:
-            errors += 1; continue
+            errors += 1
+            continue
 
-        raw = raw.reset_index()
-        raw.columns = ["time_s", "power_W"]
+        raw          = raw.reset_index()
+        raw.columns  = ["time_s", "power_W"]
         raw["time_s"]  = pd.to_numeric(raw["time_s"],  errors="coerce")
         raw["power_W"] = pd.to_numeric(raw["power_W"], errors="coerce")
         raw = raw.dropna(subset=["time_s", "power_W"])
-        if raw.empty: continue
+        if raw.empty:
+            continue
 
-        raw["group"]    = (str(row[grp_col]) if grp_col in row.index and pd.notna(row.get(grp_col)) else "all")
+        raw["group"]    = (str(row[grp_col])
+                           if grp_col in row.index and pd.notna(row.get(grp_col))
+                           else "all")
         raw["file_num"] = int(file_num)
         raw["run_idx"]  = i
 
@@ -280,10 +324,16 @@ def load_workload(base_str: str, folder: str, max_files: int = 150):
                 raw[col] = row[col]
 
         runs.append(raw)
-        bar.progress((i + 1) / len(pairs), text=f"Loading … {i+1}/{len(pairs)}")
+        bar.progress((i + 1) / len(pairs),
+                     text=f"Loading … {i+1}/{len(pairs)}")
 
     bar.empty()
-    if not runs: return None, None
+    if missing: st.warning(f"⚠️  {missing} file(s) not found")
+    if errors:  st.warning(f"⚠️  {errors} file(s) unreadable")
+    if not runs:
+        st.error("❌  No data loaded.")
+        return None, None
+
     return meta, pd.concat(runs, ignore_index=True)
 
 
@@ -330,7 +380,7 @@ def sim_soc(net_kW, pwr_kW, e_kWh, rte, dt, lo_pct, hi_pct):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SINGLE BATCH DRILL-DOWN
+# SINGLE BATCH DRILL-DOWN (WITH NEW MICRO-CYCLING METRIC)
 # ─────────────────────────────────────────────────────────────────────────────
 def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
     pw   = run_df["power_W"]
@@ -458,11 +508,16 @@ with st.sidebar:
     source_mode = st.radio(
         "Choose data source",
         options=["demo", "gdrive", "local"],
-        format_func=lambda x: {"demo":"🎯 Demo mode (synthetic — instant)", "gdrive":"☁️  Google Drive (real dataset)", "local":"💾 Local folder (your PC only)"}[x],
+        format_func=lambda x: {
+            "demo"  : "🎯 Demo mode (synthetic — instant)",
+            "gdrive": "☁️  Google Drive (real dataset)",
+            "local" : "💾 Local folder (your PC only)"
+        }[x],
         index=["demo","gdrive","local"].index(st.session_state["source_mode"])
     )
     st.session_state["source_mode"] = source_mode
 
+    # 1. Demo Mode
     if source_mode == "demo":
         st.info("Synthetic profiles. Works instantly.")
         if st.button("▶️  Load demo data", type="primary", use_container_width=True):
@@ -472,7 +527,15 @@ with st.sidebar:
             st.session_state["demo_loaded"] = True
             st.success("✅  Demo data ready")
 
+    # 2. GDrive Mode
     elif source_mode == "gdrive":
+        st.markdown("**Google Drive dataset**")
+        st.info(
+            f"File ID: `{GDRIVE_FILE_ID[:20]}…`\n\n"
+            "Click below to download and extract (~1 GB).\n\n"
+            "⚠️  Make sure upload to Google Drive is **100% complete** "
+            "and file is shared as **'Anyone with the link'** before clicking."
+        )
         if st.button("☁️  Download from Google Drive", type="primary", use_container_width=True):
             try:
                 base = download_from_gdrive(GDRIVE_FILE_ID)
@@ -482,11 +545,15 @@ with st.sidebar:
                     st.session_state["wl_found"] = found
                     st.session_state["wl_cache"] = {}
                     st.success(f"✅  {len(found)} workload(s) ready")
-                else: st.error("❌  No workloads found.")
-            except Exception as e: st.error(f"❌  Error: {e}")
+                else:
+                    st.error("❌  Dataset extracted but no workloads found.")
+            except Exception as e: 
+                st.error(f"❌  Error: {e}")
 
+    # 3. Local Mode
     else:
-        local_path = st.text_input("Folder path", value=r"C:\Users\Downloads\dataset")
+        st.markdown("**Local folder path**")
+        local_path = st.text_input("Folder path", value=r"C:\Users\gangaraju.pilly\Downloads\dataset")
         if st.button("🔍  Scan folder", type="primary", use_container_width=True):
             found = scan_workloads(local_path.strip())
             if found:
@@ -494,7 +561,8 @@ with st.sidebar:
                 st.session_state["wl_found"] = found
                 st.session_state["wl_cache"] = {}
                 st.success(f"✅  {len(found)} workload(s) found")
-            else: st.error("❌  No workloads found.")
+            else:
+                st.error("❌  No workloads found.")
 
     wl_found = st.session_state.get("wl_found", {})
     is_demo  = (source_mode == "demo" and st.session_state.get("demo_loaded"))
@@ -510,6 +578,9 @@ with st.sidebar:
             if data is not None:
                 st.session_state["wl_cache"][folder_name] = {"meta": meta, "data": data, "folder": folder_name, "is_demo": False}
                 st.success("✅  Loaded")
+    elif not is_demo and not wl_found:
+        if source_mode != "demo":
+            st.info("Load data first using the button above.")
 
     st.divider()
     st.markdown("**Step 3 — Facility & BESS**")
@@ -631,7 +702,18 @@ with tab2:
     
     sel_run = data[data["file_num"] == sel_file].sort_values("time_s").reset_index(drop=True)
     if not sel_run.empty:
-        show_single_batch(sel_run, sel_file, sel_run["group"].iloc[0], grp_lbl, dt)
+        meta_row = None
+        try:
+            wl_id_col = wl_def.get("id_col")
+            if wl_id_col and wl_id_col in meta.columns:
+                mm = meta[meta[wl_id_col].astype(int) == sel_file]
+            else:
+                mm = meta.iloc[[sel_file]] if sel_file < len(meta) else None
+            if mm is not None and len(mm) > 0:
+                meta_row = mm.iloc[0]
+        except Exception:
+            pass
+        show_single_batch(sel_run, sel_file, sel_run["group"].iloc[0], grp_lbl, dt, meta_row)
 
 with tab3:
     fig_24 = go.Figure()
