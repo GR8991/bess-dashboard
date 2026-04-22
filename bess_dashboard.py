@@ -5,10 +5,11 @@ BESS Engineering Dashboard — NLR GenAI Power Profiles Dataset
 Run locally:   streamlit run bess_dashboard.py
 Deployed at:   Streamlit Community Cloud
 
-Three data source modes:
+Data source modes:
   1. Demo mode     — built-in synthetic data, works instantly
-  2. Google Drive  — downloads real NLR dataset zip via gdown
-  3. Local mode    — paste local folder path (PC use only)
+  2. Direct URL    — downloads directly from the NLR website
+  3. Google Drive  — downloads real NLR dataset zip via gdown
+  4. Local mode    — paste local folder path (PC use only)
 
 Dataset: DOI 10.7799/3025227 — NLR Kestrel HPC
 =============================================================================
@@ -25,6 +26,7 @@ import io
 import zipfile
 import tempfile
 import warnings
+import requests # Added for direct web downloads
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,9 +56,10 @@ PALETTE = px.colors.qualitative.Plotly
 def get_color(idx): return PALETTE[int(idx) % len(PALETTE)]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE FILE ID
+# GOOGLE DRIVE FILE ID & DEFAULT WEB URL
 # ─────────────────────────────────────────────────────────────────────────────
 GDRIVE_FILE_ID = "1lD6LWo6eKaWutR4q5Gku-bWUGggffM7pi"
+DEFAULT_WEB_URL = "https://data.nrel.gov/system/files/164/dataset.zip" # Placeholder, user can edit
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WORKLOAD DEFINITIONS
@@ -162,77 +165,106 @@ def generate_demo_data():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GOOGLE DRIVE DOWNLOADER (RESTORED ORIGINAL)
+# DIRECT WEB URL DOWNLOADER (NEW)
 # ─────────────────────────────────────────────────────────────────────────────
-def download_from_gdrive(file_id: str) -> pathlib.Path:
-    import gdown
-
+def download_from_url(url: str) -> pathlib.Path:
     tmp = pathlib.Path(tempfile.mkdtemp()) / "nlr_dataset"
     tmp.mkdir(parents=True, exist_ok=True)
     zip_path = tmp / "dataset.zip"
 
-    url = f"https://drive.google.com/uc?id={file_id}"
-
-    st.info(
-        "⬇️  Downloading dataset from Google Drive (~1 GB).\n\n"
-        "This may take 5–15 minutes depending on your connection. "
-        "Please do not close this tab."
-    )
+    st.info(f"⬇️  Downloading dataset from URL...\n\nURL: `{url[:60]}...`\nPlease do not close this tab.")
 
     try:
-        gdown.download(
-            url    = url,
-            output = str(zip_path),
-            quiet  = False,
-        )
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Try to get total file size for progress bar
+        total_size = int(response.headers.get('content-length', 0))
+        progress_bar = st.progress(0, text="Downloading data...")
+        downloaded = 0
+        
+        with open(zip_path, "wb") as file:
+            for data in response.iter_content(chunk_size=1024 * 1024): # 1MB chunks
+                file.write(data)
+                downloaded += len(data)
+                if total_size > 0:
+                    progress = min(downloaded / total_size, 1.0)
+                    progress_bar.progress(progress, text=f"Downloading... {downloaded // (1024 * 1024)} MB")
+                else:
+                    progress_bar.progress(0.5, text=f"Downloading... {downloaded // (1024 * 1024)} MB downloaded (Unknown total size)")
+        
+        progress_bar.empty()
+        
     except Exception as e:
-        st.error(
-            f"❌  gdown download error: {e}\n\n"
-            "Please check:\n"
-            "1. File is shared as **'Anyone with the link'**\n"
-            "2. Google Drive upload is 100% complete\n"
-            "3. File ID is correct"
-        )
+        st.error(f"❌  Download error: {e}")
         return tmp
 
+    # Validation
     if not zip_path.exists():
         st.error("❌  Download failed — file not found after download.")
         return tmp
 
     size_mb = zip_path.stat().st_size // (1024 * 1024)
-
-    if size_mb < 10:
-        st.error(
-            f"❌  Downloaded file is too small ({size_mb} MB). "
-            "Google Drive likely returned a login/warning page.\n\n"
-            "Please ensure:\n"
-            "1. File sharing is set to **'Anyone with the link'**\n"
-            "2. Upload to Google Drive is **100% complete**"
-        )
-        return tmp
-
     st.success(f"✅  Download complete — {size_mb} MB")
 
-    with st.spinner("📦  Extracting zip … (1–2 minutes for 1 GB)"):
+    # Extract
+    with st.spinner("📦  Extracting zip …"):
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 zf.extractall(tmp)
             st.success("✅  Extraction complete")
         except zipfile.BadZipFile:
-            st.error(
-                "❌  File is not a valid zip.\n\n"
-                "The upload may not be 100% complete. "
-                "Check Google Drive upload status and try again."
-            )
+            st.error("❌  File is not a valid zip. The download may have been corrupted.")
             return tmp
 
-    candidates = [p for p in tmp.rglob("01_aggregated_datasets")
-                  if p.is_dir()]
+    candidates = [p for p in tmp.rglob("01_aggregated_datasets") if p.is_dir()]
     return candidates[0].parent if candidates else tmp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCAN & LOAD WORKLOADS (RESTORED ORIGINAL)
+# GOOGLE DRIVE DOWNLOADER
+# ─────────────────────────────────────────────────────────────────────────────
+def download_from_gdrive(file_id: str) -> pathlib.Path:
+    import gdown
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "nlr_dataset"
+    tmp.mkdir(parents=True, exist_ok=True)
+    zip_path = tmp / "dataset.zip"
+    url = f"https://drive.google.com/uc?id={file_id}"
+
+    st.info("⬇️  Downloading dataset from Google Drive (~1 GB).")
+
+    try:
+        gdown.download(url=url, output=str(zip_path), quiet=False)
+    except Exception as e:
+        st.error(f"❌  gdown download error: {e}")
+        return tmp
+
+    if not zip_path.exists():
+        st.error("❌  Download failed.")
+        return tmp
+
+    size_mb = zip_path.stat().st_size // (1024 * 1024)
+    if size_mb < 10:
+        st.error(f"❌  Downloaded file is too small ({size_mb} MB).")
+        return tmp
+
+    st.success(f"✅  Download complete — {size_mb} MB")
+
+    with st.spinner("📦  Extracting zip …"):
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp)
+            st.success("✅  Extraction complete")
+        except zipfile.BadZipFile:
+            st.error("❌  File is not a valid zip.")
+            return tmp
+
+    candidates = [p for p in tmp.rglob("01_aggregated_datasets") if p.is_dir()]
+    return candidates[0].parent if candidates else tmp
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCAN & LOAD WORKLOADS
 # ─────────────────────────────────────────────────────────────────────────────
 def scan_workloads(base_str: str) -> dict:
     base    = pathlib.Path(base_str)
@@ -284,10 +316,6 @@ def load_workload(base_str: str, folder: str, max_files: int = 150):
     if n_total > max_files:
         step  = max(1, n_total // max_files)
         pairs = pairs[::step][:max_files]
-        st.info(
-            f"ℹ️  {n_total} runs available — loading {len(pairs)} "
-            f"(every {step}th). Raise 'Max runs' slider for more."
-        )
 
     runs    = []
     missing = 0
@@ -328,8 +356,6 @@ def load_workload(base_str: str, folder: str, max_files: int = 150):
                      text=f"Loading … {i+1}/{len(pairs)}")
 
     bar.empty()
-    if missing: st.warning(f"⚠️  {missing} file(s) not found")
-    if errors:  st.warning(f"⚠️  {errors} file(s) unreadable")
     if not runs:
         st.error("❌  No data loaded.")
         return None, None
@@ -380,7 +406,7 @@ def sim_soc(net_kW, pwr_kW, e_kWh, rte, dt, lo_pct, hi_pct):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SINGLE BATCH DRILL-DOWN (WITH NEW MICRO-CYCLING METRIC)
+# SINGLE BATCH DRILL-DOWN 
 # ─────────────────────────────────────────────────────────────────────────────
 def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
     pw   = run_df["power_W"]
@@ -397,14 +423,13 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
     energy_kWh = pw.sum() * dt / 3600 / 1000
     ramp_p95   = ramp.quantile(0.95) / 1000
     
-    # Micro-cycling Calculation: Zero crossings in the derivative array
+    # Micro-cycling Calculation
     zero_crossings = np.where(np.diff(np.sign(diff_pw.dropna())))[0]
     num_micro_cycles = len(zero_crossings)
     micro_cycles_hr = num_micro_cycles / (dur_s / 3600) if dur_s > 0 else 0
 
     st.markdown(f"#### Batch detail — {grp_lbl} = **{grp_val}** | File # {file_num}")
     
-    # Split metrics into two rows for cleaner UI scaling
     row1_c1, row1_c2, row1_c3, row1_c4, row1_c5 = st.columns(5)
     row1_c1.metric("Peak", f"{peak_kW:.2f} kW")
     row1_c2.metric("Mean", f"{mean_kW:.2f} kW")
@@ -420,7 +445,6 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
     
     st.divider()
 
-    # Row 1: time-series + ramp over time
     p1a, p1b = st.columns([2, 1])
     with p1a:
         win = max(10, int(30 / dt))
@@ -440,7 +464,6 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         fig2.update_layout(title="Ramp rate over time", xaxis_title="Time (min)", yaxis_title="kW/s", height=340, hovermode="x unified", margin=dict(l=55, r=15, t=50, b=45))
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Row 2: histogram + cumulative energy + phase pie
     p2a, p2b, p2c = st.columns(3)
     with p2a:
         fig3 = go.Figure()
@@ -469,7 +492,6 @@ def show_single_batch(run_df, file_num, grp_val, grp_lbl, dt, meta_row=None):
         fig5.update_layout(title="Time in each power phase", height=300, showlegend=False, margin=dict(l=15, r=15, t=50, b=15))
         st.plotly_chart(fig5, use_container_width=True)
 
-    # Row 3: load duration + ramp up/down split
     p3a, p3b = st.columns(2)
     with p3a:
         sorted_pw = np.sort(pw.values / 1000)[::-1]
@@ -507,13 +529,14 @@ with st.sidebar:
     st.markdown("**Step 1 — Data source**")
     source_mode = st.radio(
         "Choose data source",
-        options=["demo", "gdrive", "local"],
+        options=["demo", "url", "gdrive", "local"],
         format_func=lambda x: {
-            "demo"  : "🎯 Demo mode (synthetic — instant)",
-            "gdrive": "☁️  Google Drive (real dataset)",
-            "local" : "💾 Local folder (your PC only)"
+            "demo"  : "🎯 Demo mode (synthetic)",
+            "url"   : "🌐 Direct Web URL (NLR website)",
+            "gdrive": "☁️  Google Drive",
+            "local" : "💾 Local folder"
         }[x],
-        index=["demo","gdrive","local"].index(st.session_state["source_mode"])
+        index=["demo", "url", "gdrive", "local"].index(st.session_state["source_mode"])
     )
     st.session_state["source_mode"] = source_mode
 
@@ -527,15 +550,27 @@ with st.sidebar:
             st.session_state["demo_loaded"] = True
             st.success("✅  Demo data ready")
 
-    # 2. GDrive Mode
+    # 2. Direct Web URL Mode
+    elif source_mode == "url":
+        st.markdown("**Download from URL**")
+        dataset_url = st.text_input("Paste URL to the .zip file:", value=DEFAULT_WEB_URL)
+        if st.button("🌐 Download & Extract", type="primary", use_container_width=True):
+            try:
+                base = download_from_url(dataset_url.strip())
+                found = scan_workloads(str(base))
+                if found:
+                    st.session_state["base"] = str(base)
+                    st.session_state["wl_found"] = found
+                    st.session_state["wl_cache"] = {}
+                    st.success(f"✅  {len(found)} workload(s) ready")
+                else:
+                    st.error("❌  Dataset extracted but no workloads found.")
+            except Exception as e: 
+                st.error(f"❌  Error: {e}")
+
+    # 3. GDrive Mode
     elif source_mode == "gdrive":
         st.markdown("**Google Drive dataset**")
-        st.info(
-            f"File ID: `{GDRIVE_FILE_ID[:20]}…`\n\n"
-            "Click below to download and extract (~1 GB).\n\n"
-            "⚠️  Make sure upload to Google Drive is **100% complete** "
-            "and file is shared as **'Anyone with the link'** before clicking."
-        )
         if st.button("☁️  Download from Google Drive", type="primary", use_container_width=True):
             try:
                 base = download_from_gdrive(GDRIVE_FILE_ID)
@@ -550,10 +585,10 @@ with st.sidebar:
             except Exception as e: 
                 st.error(f"❌  Error: {e}")
 
-    # 3. Local Mode
+    # 4. Local Mode
     else:
         st.markdown("**Local folder path**")
-        local_path = st.text_input("Folder path", value=r"C:\Users\gangaraju.pilly\Downloads\dataset")
+        local_path = st.text_input("Folder path", value=r"C:\Users\Downloads\dataset")
         if st.button("🔍  Scan folder", type="primary", use_container_width=True):
             found = scan_workloads(local_path.strip())
             if found:
@@ -587,7 +622,7 @@ with st.sidebar:
     facility_nodes = st.slider("Total GPU nodes", 10, 500, 156, 10)
     pue            = st.slider("PUE", 1.05, 2.00, 1.20, 0.05)
     solar_frac     = st.slider("Solar PV (% of peak)", 20, 100, 60, 5)
-    bess_margin    = st.slider("BESS safety margin (%)", 0, 100, 25, 5) / 100.0  # NEW: Margin for volatile loads
+    bess_margin    = st.slider("BESS safety margin (%)", 0, 100, 25, 5) / 100.0
     bess_dur       = st.slider("BESS duration (hours)", 1, 8, 4, 1)
     rte            = st.slider("Round-trip efficiency", 0.80, 0.98, 0.92, 0.01)
     soc_min        = st.slider("Min SoC (%)", 5, 30, 20, 5)
@@ -633,7 +668,6 @@ fac_peak_kW = peak_W / 1000 * scale * pue
 fac_idle_kW = idle_W / 1000 * scale * pue
 fac_mean_kW = mean_W / 1000 * scale * pue
 
-# NEW MATH: Safe buffer calculated from Peak-Mean delta + user-defined margin
 bess_pwr_kW = max(0, (fac_peak_kW - fac_mean_kW) * (1 + bess_margin))
 bess_e_kWh  = bess_pwr_kW * bess_dur
 c_rate      = bess_pwr_kW / max(bess_e_kWh, 1e-9)
