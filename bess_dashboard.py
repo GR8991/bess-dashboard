@@ -7,7 +7,7 @@ Deployed at:   Streamlit Community Cloud
 
 Data source modes:
   1. Demo mode     — built-in synthetic data, works instantly
-  2. NREL Auto     — fetches directly from the hardcoded NREL URL
+  2. NLR Auto      — fetches directly from the hardcoded NLR URL
   3. Google Drive  — downloads real dataset via Google Drive ID
   4. Local mode    — paste local folder path (PC use only)
 
@@ -52,7 +52,7 @@ def get_color(idx): return PALETTE[int(idx) % len(PALETTE)]
 
 # >>> HARDCODED DATA SOURCES <<<
 GDRIVE_FILE_ID = "1lD6LWo6eKaWutR4q5Gku-bWUGggffM7pi"
-NREL_DATASET_URL = "https://data.nrel.gov/system/files/164/dataset.zip" # Update this if the NREL link changes
+NREL_DATASET_URL = "https://data.nlr.gov/system/files/312/1774982010-dataset.zip" # UPDATED WITH YOUR WORKING LINK
 
 WORKLOAD_DEFS = {
     "training": {"label": "🏋️  Training (Llama2 LoRA + Stable Diffusion)", "id_col": "Unnamed: 0", "group_col": "nodes", "group_lbl": "Nodes", "extra_cols": ["model", "repeat"]},
@@ -69,7 +69,7 @@ def download_from_url(url: str) -> pathlib.Path:
     tmp.mkdir(parents=True, exist_ok=True)
     zip_path = tmp / "dataset.zip"
 
-    st.info("⬇️  Fetching dataset from NREL servers...\nPlease do not close this tab.")
+    st.info("⬇️  Fetching dataset from NLR servers...\nPlease do not close this tab.")
 
     try:
         response = requests.get(url, stream=True)
@@ -91,7 +91,7 @@ def download_from_url(url: str) -> pathlib.Path:
         progress_bar.empty()
         
     except Exception as e:
-        st.error(f"❌  Download error: Could not fetch from URL. Make sure the NREL link is still active. Details: {e}")
+        st.error(f"❌  Download error: Could not fetch from URL. Make sure the link is still active. Details: {e}")
         return tmp
 
     if not zip_path.exists():
@@ -235,7 +235,7 @@ with st.sidebar:
     source_mode = st.radio(
         "Choose data source",
         options=["demo", "nrel", "gdrive", "local"],
-        format_func=lambda x: {"demo":"🎯 Demo mode (synthetic)", "nrel":"🌐 NREL Database (Auto-fetch)", "gdrive":"☁️  Google Drive", "local":"💾 Local folder"}[x],
+        format_func=lambda x: {"demo":"🎯 Demo mode (synthetic)", "nrel":"🌐 NLR Database (Auto-fetch)", "gdrive":"☁️  Google Drive", "local":"💾 Local folder"}[x],
         index=["demo", "nrel", "gdrive", "local"].index(st.session_state["source_mode"])
     )
     st.session_state["source_mode"] = source_mode
@@ -247,11 +247,10 @@ with st.sidebar:
             st.session_state["wl_cache"]["demo"] = {"meta": meta, "data": data, "folder": "training", "is_demo": True}
             st.session_state["demo_loaded"] = True
 
-    # -> NEW AUTO FETCH LOGIC HERE <-
     elif source_mode == "nrel":
-        st.markdown("**Download directly from NREL**")
-        st.info("This will automatically fetch the Kestrel HPC GenAI dataset directly from the NREL servers (~1 GB).")
-        if st.button("🌐 Download NREL Data", type="primary", use_container_width=True):
+        st.markdown("**Download directly from NLR**")
+        st.info("This will automatically fetch the Kestrel HPC GenAI dataset directly from the NLR servers (~1 GB).")
+        if st.button("🌐 Download Data", type="primary", use_container_width=True):
             try:
                 base = download_from_url(NREL_DATASET_URL)
                 found = scan_workloads(str(base))
