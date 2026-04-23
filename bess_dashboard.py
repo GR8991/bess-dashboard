@@ -1,4 +1,3 @@
-
 '''=============================================================================
 BESS Engineering Dashboard — NLR GenAI Power Profiles Dataset
 =============================================================================
@@ -13,7 +12,7 @@ Data source modes:
 
 Dataset: DOI 10.7799/3025227 — NLR Kestrel HPC
 =============================================================================
-"""
+
 
 import streamlit as st
 import pandas as pd
