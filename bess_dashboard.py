@@ -1604,7 +1604,7 @@ if _ok:
                 figM=go.Figure()
                 for i,(_,row) in enumerate(cs.iterrows()):
                     fn=int(row["File #"])
-                    figM.add_trace(go.Bar(name=f"File {fn}|{row['Group']}",
+                    figM.add_trace(go.Bar(name=f"File {fn}|nodes={row.get('Nodes', row.get('Group','?'))}",
                         x=mets,y=[row[m] for m in mets],marker_color=clr(sel.index(fn))))
                 figM.update_layout(title="Key metrics",barmode="group",
                     yaxis_title="Value",height=300,margin=dict(l=55,r=15,t=50,b=45))
