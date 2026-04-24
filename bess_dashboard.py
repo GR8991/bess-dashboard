@@ -1063,6 +1063,10 @@ if _ok:
 
     groups = sorted(data["group"].unique().tolist())
     gcols  = {g:clr(i) for i,g in enumerate(groups)}
+    # also add integer keys so node count lookups never fail
+    for _g in list(gcols.keys()):
+        try: gcols[int(float(_g))] = gcols[_g]
+        except: pass
     sdf    = _stats(data,dt)
 
     pk_W  = float(data["power_W"].max())
@@ -1325,7 +1329,7 @@ if _ok:
         st.markdown("### Power profiles — all batches")
         figAll=go.Figure()
         for g in groups:  
-            cg=gcols[g]; shown=False
+            cg=gcols.get(str(g), gcols.get(g, "#378ADD")); shown=False
             for fid,run in data[data["group"]==g].groupby("file_num"):
                 rs=_ds(run.sort_values("time_s"))
                 figAll.add_trace(go.Scatter(
@@ -1347,7 +1351,7 @@ if _ok:
                 pc=np.arange(1,len(pw)+1)/len(pw)*100
                 sk=max(1,len(pw)//400)
                 figL.add_trace(go.Scatter(x=pc[::sk],y=pw[::sk],mode="lines",
-                    name=f"{glbl}={g}",line=dict(color=gcols[g],width=1.8)))
+                    name=f"{glbl}={g}",line=dict(color=gcols.get(str(g), gcols.get(g, "#378ADD")),width=1.8)))
             figL.update_layout(title="Load duration curve",
                 xaxis_title="% exceeded",yaxis_title="kW",
                 height=300,margin=dict(l=55,r=15,t=50,b=45))
@@ -1359,7 +1363,7 @@ if _ok:
                     .diff().abs().div(dt).dropna()/1000)
                 rm=rm[rm<=rm.quantile(.999)]
                 figR.add_trace(go.Histogram(x=rm,name=f"{glbl}={g}",
-                    marker_color=gcols[g],opacity=.60,nbinsx=50))
+                    marker_color=gcols.get(str(g), gcols.get(g, "#378ADD")),opacity=.60,nbinsx=50))
             figR.add_vline(x=r95/1000,line_dash="dash",line_color="red",
                 annotation_text=f"95th {r95/1000:.3f}",annotation_position="top right")
             figR.update_layout(title="Ramp rate distribution",
@@ -1373,7 +1377,7 @@ if _ok:
             figBx=go.Figure()
             for g in groups:  
                 figBx.add_trace(go.Box(y=data[data["group"]==g]["power_W"]/1000,
-                    name=str(g),marker_color=gcols[g],boxmean=True,showlegend=False))
+                    name=str(g),marker_color=gcols.get(str(g), gcols.get(g, "#378ADD")),boxmean=True,showlegend=False))
             figBx.update_layout(title=f"Distribution by {glbl}",
                 yaxis_title="kW",height=280,margin=dict(l=55,r=15,t=50,b=45))
             st.plotly_chart(figBx,use_container_width=True)
@@ -1390,7 +1394,7 @@ if _ok:
             figLF=go.Figure()
             figLF.add_trace(go.Bar(x=lfa["Nodes"].astype(str),y=lfa["mean"].round(1),
                 error_y=dict(type="data",array=lfa["std"].round(1)),
-                marker_color=[gcols[g] for g in lfa["Nodes"]],
+                marker_color=[gcols.get(str(g), gcols.get(g, "#378ADD")) for g in lfa["Nodes"]],
                 text=lfa["mean"].round(1).astype(str)+"%",textposition="outside"))
             figLF.update_layout(title="Load factor",yaxis_title="LF %",
                 yaxis=dict(range=[0,115]),height=280,margin=dict(l=55,r=15,t=50,b=45))
