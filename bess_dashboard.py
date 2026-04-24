@@ -338,10 +338,10 @@ def _batch_panel(run, fnum, gval, glbl, dt, mrow=None):
         win=max(10,int(30/dt))
         sl=_ds(run.sort_values("time_s"))
         fig=go.Figure()
-        fig.add_trace(go.Scatter(x=sl["time_s"]/60,y=sl["power_W"]/1000,
+        fig.add_trace(go.Scatter(x=sl["time_s"],y=sl["power_W"]/1000,
             mode="lines",name="Power",line=dict(color="#378ADD",width=1.2)))
         fig.add_trace(go.Scatter(
-            x=_ds(t)/60,
+            x=_ds(t),
             y=_ds(pw.rolling(win,center=True).mean())/1000,
             mode="lines",name=f"Mean({win*dt:.0f}s)",
             line=dict(color="#E24B4A",width=2,dash="dot")))
@@ -349,7 +349,7 @@ def _batch_panel(run, fnum, gval, glbl, dt, mrow=None):
                       annotation_text=f"Peak {pk:.2f}",annotation_position="top right")
         fig.add_hline(y=mn, line_dash="dot", line_color="#1D9E75",
                       annotation_text=f"Mean {mn:.2f}",annotation_position="bottom right")
-        fig.update_layout(title="Power time-series",xaxis_title="min",
+        fig.update_layout(title="Power time-series",xaxis_title="Time (s)",
             yaxis_title="kW",height=320,hovermode="x unified",
             margin=dict(l=55,r=120,t=45,b=45))
         st.plotly_chart(fig,use_container_width=True)
@@ -357,12 +357,12 @@ def _batch_panel(run, fnum, gval, glbl, dt, mrow=None):
         sl2=_ds(run.sort_values("time_s"))
         rmp2=sl2["power_W"].diff().abs()/max(dt,1e-9)/1000
         fig2=go.Figure()
-        fig2.add_trace(go.Scatter(x=sl2["time_s"]/60,y=rmp2,mode="lines",
+        fig2.add_trace(go.Scatter(x=sl2["time_s"],y=rmp2,mode="lines",
             line=dict(color="#f38ba8",width=0.8),
             fill="tozeroy",fillcolor="rgba(243,139,168,.10)"))
         fig2.add_hline(y=r95,line_dash="dash",line_color="red",
                        annotation_text=f"95th {r95:.4f}")
-        fig2.update_layout(title="Ramp rate dP/dt",xaxis_title="min",
+        fig2.update_layout(title="Ramp rate dP/dt",xaxis_title="Time (s)",
             yaxis_title="kW/s",height=320,hovermode="x unified",
             margin=dict(l=55,r=100,t=45,b=45))
         st.plotly_chart(fig2,use_container_width=True)
@@ -384,10 +384,10 @@ def _batch_panel(run, fnum, gval, glbl, dt, mrow=None):
         sl4=_ds(run.sort_values("time_s"))
         cumE4=_ds(pd.Series(cumE))
         fig4=go.Figure()
-        fig4.add_trace(go.Scatter(x=sl4["time_s"]/60,y=cumE4,mode="lines",
+        fig4.add_trace(go.Scatter(x=sl4["time_s"],y=cumE4,mode="lines",
             fill="tozeroy",fillcolor="rgba(29,158,117,.15)",
             line=dict(color="#1D9E75",width=1.5)))
-        fig4.update_layout(title="Cumulative energy",xaxis_title="min",
+        fig4.update_layout(title="Cumulative energy",xaxis_title="Time (s)",
             yaxis_title="kWh/node",height=260,hovermode="x unified",
             margin=dict(l=55,r=15,t=45,b=45))
         st.plotly_chart(fig4,use_container_width=True)
@@ -483,7 +483,7 @@ def _node_panel(run, nn, fnum, model, dt):
     for lbl,col,s,e in SEG:
         if e<=s: continue
         sl=_ds(df.iloc[s:e])
-        figA.add_trace(go.Scatter(x=sl["time_s"]/60,
+        figA.add_trace(go.Scatter(x=sl["time_s"],
             y=pw.iloc[s:e].iloc[::max(1,(e-s)//400)]/1000,
             mode="lines",name=lbl,line=dict(color=col,width=1.5)))
     for level,lbl,col in [(idl,f"Idle {idl/1000:.2f}","#6b7280"),
@@ -492,7 +492,7 @@ def _node_panel(run, nn, fnum, model, dt):
         figA.add_hline(y=level/1000,line_dash="dot",line_color=col,
                        annotation_text=lbl,annotation_position="right")
     figA.update_layout(title=f"{nn}-node {model} training — per node",
-        xaxis_title="min",yaxis_title="kW/node",height=340,
+        xaxis_title="Time (s)",yaxis_title="kW/node",height=340,
         hovermode="x unified",
         legend=dict(orientation="h",y=1.1,font=dict(size=10)),
         margin=dict(l=55,r=150,t=55,b=45))
@@ -1209,7 +1209,7 @@ if _ok:
                     rs  = _ds(run)
                     pw_per_node = rs["power_W"] / max(nn_run, 1)
                     figN.add_trace(go.Scatter(
-                        x=rs["time_s"]/60, y=pw_per_node/1000,
+                        x=rs["time_s"], y=pw_per_node/1000,
                         mode="lines",
                         name=f"{nc} nodes",
                         legendgroup=str(nc),
@@ -1227,7 +1227,7 @@ if _ok:
                            annotation_text=f"Idle {idl_node:.2f} kW/node",
                            annotation_position="bottom right")
             figN.update_layout(
-                xaxis_title="Time (min)", yaxis_title="Power per node (kW)",
+                xaxis_title="Time (s)", yaxis_title="Power per node (kW)",
                 height=380, hovermode="x unified",
                 legend=dict(title="Node count", orientation="h", y=1.1, font=dict(size=10)),
                 margin=dict(l=55, r=150, t=20, b=45),
@@ -1333,12 +1333,12 @@ if _ok:
             for fid,run in data[data["group"]==g].groupby("file_num"):
                 rs=_ds(run.sort_values("time_s"))
                 figAll.add_trace(go.Scatter(
-                    x=rs["time_s"]/60,y=rs["power_W"]/1000,mode="lines",
+                    x=rs["time_s"],y=rs["power_W"]/1000,mode="lines",
                     line=dict(color=cg,width=0.9),opacity=.40,
                     name=f"{glbl}={g}",legendgroup=str(g),showlegend=not shown,
                     hovertemplate=f"{glbl}={g}|t=%{{x:.1f}}m|%{{y:.2f}}kW<extra></extra>",
                 )); shown=True
-        figAll.update_layout(xaxis_title="min",yaxis_title="kW",height=380,
+        figAll.update_layout(xaxis_title="Time (s)",yaxis_title="kW",height=380,
             hovermode="x unified",legend=dict(title=glbl,font=dict(size=10)),
             margin=dict(l=55,r=15,t=20,b=45))
         st.plotly_chart(figAll,use_container_width=True)
@@ -1421,8 +1421,8 @@ if _ok:
             ri2=sdf[sdf["File #"]==sf]
             if not ri2.empty:
                 r=ri2.iloc[0]
-                st.info(f"**{glbl}**={r['Group']} | Peak={r['Peak kW']} kW | "
-                        f"Mean={r['Mean kW']} kW | Dur={r['Dur s']} s")
+                st.info(f"**{glbl}**={str(int(r['Nodes'])) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
+                        f"Mean={r.get('Mean kW/node', r.get('Mean kW','?'))} kW | Dur={r.get('Dur s','?')} s")
         st.divider()
         sr=data[data["file_num"]==sf].sort_values("time_s").reset_index(drop=True)
         sgv=sr["group"].iloc[0] if len(sr)>0 else "?"
@@ -1458,8 +1458,8 @@ if _ok:
             nr=sdf[sdf["File #"]==nf]
             if not nr.empty:
                 r=nr.iloc[0]
-                st.info(f"**{glbl}**={r['Group']} | Peak={r['Peak kW']} kW | "
-                        f"Energy={r['kWh']} kWh | Dur={r['Dur s']} s")
+                st.info(f"**{glbl}**={str(int(r['Nodes'])) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
+                        f"Energy={r['kWh']} kWh | Dur={r.get('Dur s','?')} s")
         st.divider()
         nd=data[data["file_num"]==nf].sort_values("time_s").reset_index(drop=True)
         if len(nd)==0:
@@ -1567,7 +1567,7 @@ if _ok:
             default=afns[:min(3,len(afns))],
             format_func=lambda x:(
                 f"File {x:06d}|{glbl}={data[data['file_num']==x]['group'].iloc[0]}"
-                f"|Pk={sdf[sdf['File #']==x]['Peak kW'].values[0] if len(sdf[sdf['File #']==x])>0 else '?'}kW"
+                f"|Pk={sdf[sdf['File #']==x]['Peak kW/node'].values[0] if len(sdf[sdf['File #']==x])>0 else '?'}kW"
             ))
         if len(sel)<2:
             st.info("Select ≥ 2 batches.")
@@ -1577,11 +1577,11 @@ if _ok:
                 run=data[data["file_num"]==fn]
                 grp=run["group"].iloc[0]
                 rs=_ds(run.sort_values("time_s"))
-                figC.add_trace(go.Scatter(x=rs["time_s"]/60,y=rs["power_W"]/1000,
+                figC.add_trace(go.Scatter(x=rs["time_s"],y=rs["power_W"]/1000,
                     mode="lines",name=f"File {fn}|{glbl}={grp}",
                     line=dict(color=clr(i),width=1.5),
                     hovertemplate=f"File {fn}<br>t=%{{x:.1f}}m|%{{y:.2f}}kW<extra></extra>"))
-            figC.update_layout(title="Overlay",xaxis_title="min",yaxis_title="kW",
+            figC.update_layout(title="Overlay",xaxis_title="Time (s)",yaxis_title="kW",
                 height=340,hovermode="x unified",margin=dict(l=55,r=15,t=50,b=45))
             st.plotly_chart(figC,use_container_width=True)
 
