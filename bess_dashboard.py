@@ -1421,7 +1421,7 @@ if _ok:
             ri2=sdf[sdf["File #"]==sf]
             if not ri2.empty:
                 r=ri2.iloc[0]
-                st.info(f"**{glbl}**={str(int(r['Nodes'])) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
+                st.info(f"**{glbl}**={str(int(r.get('Nodes','?'))) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
                         f"Mean={r.get('Mean kW/node', r.get('Mean kW','?'))} kW | Dur={r.get('Dur s','?')} s")
         st.divider()
         sr=data[data["file_num"]==sf].sort_values("time_s").reset_index(drop=True)
@@ -1458,8 +1458,8 @@ if _ok:
             nr=sdf[sdf["File #"]==nf]
             if not nr.empty:
                 r=nr.iloc[0]
-                st.info(f"**{glbl}**={str(int(r['Nodes'])) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
-                        f"Energy={r['kWh']} kWh | Dur={r.get('Dur s','?')} s")
+                st.info(f"**{glbl}**={str(int(r.get('Nodes','?'))) if 'Nodes' in r.index else r.get('Group','?')} | Peak={r.get('Peak kW/node', r.get('Peak kW','?'))} kW | "
+                        f"Energy={r.get('kWh/node', r.get('kWh','?'))} kWh | Dur={r.get('Dur s','?')} s")
         st.divider()
         nd=data[data["file_num"]==nf].sort_values("time_s").reset_index(drop=True)
         if len(nd)==0:
