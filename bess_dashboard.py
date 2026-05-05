@@ -1309,7 +1309,7 @@ if _ok:
             pcs_rows=[]
             for lbl,s,e,col in SEG_PCS:
                 if e<=s: continue
-                seg=pcs_pw[s:e]; dp=np.abs(np.gradient(seg,pcs_dt))
+                seg=pcs_pw[s:e]; dp=np.abs(np.gradient(seg,pcs_dt)) if len(seg)>2 else np.zeros(max(len(seg),1)) if len(seg)>2 else np.array([0.,0.])
                 pcs_rows.append({
                     "Phase":lbl,"Duration (s)":round((e-s)*pcs_dt,1),
                     "Mean (W)":round(float(seg.mean()),1),
