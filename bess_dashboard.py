@@ -101,12 +101,49 @@ def _ds(df_or_arr, n=400):
             return df_or_arr
         step = max(1, len(df_or_arr) // n)
         return df_or_arr.iloc[::step]
-    else:                                   # numpy array or Series
+    else:
         arr = np.asarray(df_or_arr)
         if len(arr) <= n:
             return arr
         step = max(1, len(arr) // n)
         return arr[::step]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SINGLE NODE PCS HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _detect_phases(pw, peak_th=0.70, idle_th=0.05):
+    """Detect phase boundaries in a per-node power array."""
+    mn, mx = pw.min(), pw.max()
+    rng    = max(mx - mn, 1.0)
+    lo     = mn + rng * idle_th
+    hi     = mn + rng * peak_th
+    n      = len(pw)
+    ri  = next((i for i in range(n)          if pw[i] > lo),   0)
+    re  = next((i for i in range(ri, n)      if pw[i] > hi),   ri)
+    pe  = next((i for i in range(n-1,re,-1)  if pw[i] > hi),   re)
+    rde = next((i for i in range(pe, n)      if pw[i] < lo),   n-1)
+    return ri, re, pe, rde   # ramp-up start, ramp-up end, plateau end, ramp-down end
+
+def _fft_seg(pw_seg, dt=0.2, npts=800):
+    """One-sided FFT. Returns (freqs, amps, dom_freq_hz, dom_period_s)."""
+    n = len(pw_seg)
+    if n < 16: return None
+    sig   = pw_seg - pw_seg.mean()
+    amps  = np.abs(np.fft.rfft(sig)) / n * 2
+    freqs = np.fft.rfftfreq(n, d=dt)
+    freqs, amps = freqs[1:], amps[1:]
+    step  = max(1, len(freqs)//npts)
+    dom   = int(np.argmax(amps))
+    df_hz = float(freqs[dom]) if len(freqs) > 0 else 0.
+    dT    = 1./df_hz if df_hz > 0 else float("inf")
+    return freqs[::step], amps[::step], df_hz, dT
+
+def _rgba(hex_col, alpha=0.12):
+    """Convert #rrggbb to rgba(r,g,b,alpha) string."""
+    r = int(hex_col[1:3],16)
+    g = int(hex_col[3:5],16)
+    b = int(hex_col[5:7],16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEMO DATA GENERATOR
@@ -1131,9 +1168,514 @@ if _ok:
     st.divider()
 
     # ── tabs ─────────────────────────────────────────────────────────────────
-    t0,t1,t2,t3,t4,t5=st.tabs([
+    t_pcs,t0,t1,t2,t3,t4,t5=st.tabs([
+        "🔬 Single Node PCS",
         "🖥️ Node overview","📊 All runs","🔬 Single run","🔍 Node deep-dive",
         "🔋 BESS sizing","⚖️ Comparison"])
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB PCS — SINGLE NODE PCS ANALYSIS
+    # ════════════════════════════════════════════════════════════════════════
+    with t_pcs:
+        st.markdown("### 🔬 Single Node PCS Analysis")
+        st.caption(
+            "Deep analysis of ONE node power behaviour — the foundation of PCS design. "
+            "All values are per-node (combined power ÷ node count). "
+            "Work through each phase tab in order."
+        )
+
+        # ── run selector ─────────────────────────────────────────────────────
+        pcs_c1, pcs_c2, pcs_c3 = st.columns([1, 1, 1])
+        with pcs_c1:
+            pcs_node_opts = ["All"] + sorted(set(str(g) for g in groups))
+            pcs_node_sel  = st.selectbox("Filter by node count",
+                                         pcs_node_opts, key="pcs_node")
+        pcs_avail = (data[["file_num","group"]].drop_duplicates()
+                     if pcs_node_sel == "All"
+                     else data[data["group"] == pcs_node_sel][
+                         ["file_num","group"]].drop_duplicates())
+        pcs_fids = sorted(pcs_avail["file_num"].unique().tolist())
+
+        with pcs_c2:
+            pcs_fid = st.selectbox("Select run", pcs_fids,
+                format_func=lambda x: (
+                    f"File {x:03d} | nodes={data[data['file_num']==x]['group'].iloc[0]}"
+                    + (f" | {data[data['file_num']==x]['model'].iloc[0]}"
+                       if 'model' in data.columns else "")
+                ), key="pcs_fid")
+
+        with pcs_c3:
+            pcs_p_th = st.slider("Plateau threshold (%)", 60, 90, 70, 5,
+                                  key="pcs_pth",
+                                  help="% of peak that counts as plateau")
+            pcs_i_th = st.slider("Idle threshold (%)", 3, 20, 5, 1,
+                                  key="pcs_ith",
+                                  help="% of peak range that counts as idle")
+
+        # ── extract per-node data ─────────────────────────────────────────────
+        pcs_run = data[data["file_num"]==pcs_fid].sort_values("time_s").reset_index(drop=True)
+        try:
+            pcs_nn = int(float(pcs_run["group"].iloc[0]))
+        except Exception:
+            pcs_nn = 1
+        if "nodes" in pcs_run.columns:
+            try: pcs_nn = int(pcs_run["nodes"].iloc[0])
+            except: pass
+        pcs_mdl = pcs_run["model"].iloc[0] if "model" in pcs_run.columns else "unknown"
+
+        pcs_pw  = (pcs_run["power_W"] / max(pcs_nn,1)).values.astype(float)
+        pcs_t   = pcs_run["time_s"].values.astype(float)
+        pcs_dt  = float(np.median(np.diff(pcs_t))) if len(pcs_t) > 1 else 0.2
+        pcs_dt  = max(pcs_dt, 0.01)
+        pcs_dpdt= np.gradient(pcs_pw, pcs_dt)
+
+        # phase detection
+        pcs_ri, pcs_re, pcs_pe, pcs_rde = _detect_phases(
+            pcs_pw, peak_th=pcs_p_th/100, idle_th=pcs_i_th/100)
+
+        # key numbers
+        pcs_pk  = float(pcs_pw.max())
+        pcs_idl = float(pcs_pw[:max(pcs_ri,1)].mean()) if pcs_ri>0 else float(np.percentile(pcs_pw,5))
+        pcs_mn  = float(pcs_pw[pcs_re:pcs_pe].mean()) if pcs_pe>pcs_re else pcs_pk*0.86
+        pcs_std = float(pcs_pw[pcs_re:pcs_pe].std())  if pcs_pe>pcs_re else 0.
+        pcs_ru_dur = (pcs_re - pcs_ri) * pcs_dt
+        pcs_rd_dur = (pcs_rde - pcs_pe) * pcs_dt
+        pcs_ru_rate= (pcs_pk-pcs_idl)/max(pcs_ru_dur,pcs_dt)
+        pcs_rd_rate= (pcs_pk-pcs_idl)/max(pcs_rd_dur,pcs_dt)
+
+        # KPIs
+        st.markdown(f"**Run:** File {pcs_fid:03d} | {pcs_nn} nodes | {pcs_mdl} | "
+                    f"{len(pcs_pw):,} samples | dt={pcs_dt:.2f}s")
+        pk1,pk2,pk3,pk4,pk5,pk6,pk7,pk8 = st.columns(8)
+        for c,l,v in zip([pk1,pk2,pk3,pk4,pk5,pk6,pk7,pk8],
+            ["Peak/node","Idle/node","Mean plateau","Std plateau",
+             "Ramp-up dur","Ramp-dn dur","Ramp-up rate","Ramp-dn rate"],
+            [f"{pcs_pk:.0f} W",f"{pcs_idl:.0f} W",f"{pcs_mn:.0f} W",
+             f"{pcs_std:.0f} W",f"{pcs_ru_dur:.1f} s",f"{pcs_rd_dur:.1f} s",
+             f"{pcs_ru_rate:.1f} W/s",f"{pcs_rd_rate:.1f} W/s"]):
+            c.metric(l,v)
+        st.divider()
+
+        # phase tabs inside PCS tab
+        ph0,ph1,ph2,ph3,ph4,ph5 = st.tabs([
+            "📋 Full cycle",
+            "😴 Idle",
+            "📈 Ramp-up",
+            "⚡ Operational",
+            "📉 Ramp-down",
+            "🔧 PCS spec",
+        ])
+
+        # ── FULL CYCLE ────────────────────────────────────────────────────────
+        with ph0:
+            st.markdown("#### Full power cycle — all phases coloured")
+            SEG_PCS = [
+                ("😴 Idle pre",  0,       pcs_ri,      "#6b7280"),
+                ("📈 Ramp-up",   pcs_ri,  pcs_re,      "#ef4444"),
+                ("⚡ Plateau",   pcs_re,  pcs_pe,      "#f59e0b"),
+                ("📉 Ramp-down", pcs_pe,  pcs_rde,     "#3b82f6"),
+                ("😴 Idle post", pcs_rde, len(pcs_pw), "#6b7280"),
+            ]
+            figFC = go.Figure()
+            for lbl,s,e,col in SEG_PCS:
+                if e<=s: continue
+                t_s = _ds(pcs_t[s:e]); p_s = _ds(pcs_pw[s:e])
+                figFC.add_trace(go.Scatter(
+                    x=t_s, y=p_s, mode="lines", name=lbl,
+                    line=dict(color=col,width=2),
+                    fill="tozeroy", fillcolor=_rgba(col,0.10),
+                    hovertemplate=f"{lbl}<br>t=%{{x:.1f}}s | %{{y:.0f}}W<extra></extra>"))
+            for idx,lbl in [(pcs_ri,"Job starts"),(pcs_re,"Plateau"),
+                            (pcs_pe,"Job ends"),(pcs_rde,"Idle")]:
+                if idx < len(pcs_t):
+                    figFC.add_vline(x=pcs_t[idx],line_dash="dot",
+                                    line_color="rgba(200,200,200,0.4)",
+                                    annotation_text=lbl,
+                                    annotation_font_size=9,
+                                    annotation_position="top right")
+            figFC.add_hline(y=pcs_idl,line_dash="dot",line_color="#6b7280",
+                            annotation_text=f"Idle {pcs_idl:.0f}W",
+                            annotation_position="right")
+            figFC.add_hline(y=pcs_pk, line_dash="dash",line_color="#ef4444",
+                            annotation_text=f"Peak {pcs_pk:.0f}W",
+                            annotation_position="right")
+            figFC.update_layout(xaxis_title="Time (s)",yaxis_title="Power per node (W)",
+                height=380,hovermode="x unified",
+                legend=dict(orientation="h",y=1.10,font=dict(size=10)),
+                margin=dict(l=60,r=160,t=40,b=50))
+            st.plotly_chart(figFC,use_container_width=True)
+
+            # phase summary table
+            pcs_rows=[]
+            for lbl,s,e,col in SEG_PCS:
+                if e<=s: continue
+                seg=pcs_pw[s:e]; dp=np.abs(np.gradient(seg,pcs_dt))
+                pcs_rows.append({
+                    "Phase":lbl,"Duration (s)":round((e-s)*pcs_dt,1),
+                    "Mean (W)":round(float(seg.mean()),1),
+                    "Peak (W)":round(float(seg.max()),1),
+                    "Std (W)":round(float(seg.std()),1),
+                    "Max dP/dt (W/s)":round(float(dp.max()),1),
+                    "95th dP/dt (W/s)":round(float(np.percentile(dp,95)),1),
+                })
+            st.dataframe(pd.DataFrame(pcs_rows),use_container_width=True,hide_index=True)
+            st.info(
+                f"**Key for PCS design:** "
+                f"Ramp-up = {pcs_ru_dur:.1f}s at {pcs_ru_rate:.1f} W/s | "
+                f"Ramp-down = {pcs_rd_dur:.1f}s at {pcs_rd_rate:.1f} W/s | "
+                f"Ramp-down is **{pcs_rd_rate/max(pcs_ru_rate,1):.1f}× faster** → "
+                f"size PCS inverter for ramp-DOWN"
+            )
+
+        # ── IDLE ─────────────────────────────────────────────────────────────
+        with ph1:
+            st.markdown("#### 😴 Idle — baseline & BESS recharge window")
+            pw_idle = pcs_pw[:pcs_ri] if pcs_ri>4 else pcs_pw[pcs_rde:]
+            t_idle  = pcs_t[:pcs_ri]  if pcs_ri>4 else pcs_t[pcs_rde:]
+            if len(pw_idle)<4:
+                st.warning("Idle segment too short. Reduce idle threshold.")
+            else:
+                im=float(pw_idle.mean()); ist=float(pw_idle.std())
+                dp_i=np.abs(np.gradient(pw_idle,pcs_dt))
+                ik1,ik2,ik3,ik4 = st.columns(4)
+                ik1.metric("Mean idle",    f"{im:.0f} W")
+                ik2.metric("Std (noise floor)", f"{ist:.0f} W",
+                           help="Set PCS dead-band above this value")
+                ik3.metric("Max |dP/dt|",  f"{dp_i.max():.1f} W/s")
+                ik4.metric("% of peak",    f"{im/pcs_pk*100:.1f} %")
+                i1,i2=st.columns(2)
+                with i1:
+                    figI=go.Figure()
+                    figI.add_trace(go.Scatter(x=_ds(t_idle-t_idle[0]),y=_ds(pw_idle),
+                        mode="lines",line=dict(color="#6b7280",width=1.2),
+                        fill="tozeroy",fillcolor="rgba(107,114,128,0.10)"))
+                    figI.add_hline(y=im,line_dash="dash",line_color="#f59e0b",
+                                   annotation_text=f"Mean {im:.0f}W")
+                    figI.add_hline(y=im+3*ist,line_dash="dot",line_color="#ef4444",
+                                   annotation_text=f"Mean+3σ {im+3*ist:.0f}W")
+                    figI.update_layout(xaxis_title="Time (s)",yaxis_title="W",
+                        height=280,hovermode="x unified",
+                        margin=dict(l=60,r=120,t=30,b=50))
+                    st.plotly_chart(figI,use_container_width=True)
+                with i2:
+                    figIh=go.Figure()
+                    figIh.add_trace(go.Histogram(x=pw_idle,nbinsx=40,
+                        marker_color="#6b7280",opacity=0.80))
+                    figIh.add_vline(x=im,line_dash="dash",line_color="#f59e0b",
+                                    annotation_text=f"{im:.0f}W")
+                    figIh.update_layout(xaxis_title="W",yaxis_title="Count",
+                        height=280,margin=dict(l=60,r=15,t=30,b=50))
+                    st.plotly_chart(figIh,use_container_width=True)
+                # FFT idle
+                res_i=_fft_seg(pw_idle,pcs_dt)
+                if res_i:
+                    fq_i,am_i,_,_=res_i
+                    figIF=go.Figure()
+                    figIF.add_trace(go.Scatter(x=fq_i,y=am_i,mode="lines",
+                        line=dict(color="#6b7280",width=1.2),
+                        fill="tozeroy",fillcolor="rgba(107,114,128,0.10)"))
+                    figIF.update_layout(
+                        title="FFT idle — should be flat (no rhythmic cycles)",
+                        xaxis_title="Hz",yaxis_title="Amplitude (W)",
+                        xaxis_type="log",xaxis=dict(range=[-3,0.4]),
+                        height=220,margin=dict(l=60,r=15,t=50,b=50))
+                    st.plotly_chart(figIF,use_container_width=True)
+                st.success(
+                    f"**PCS — idle phase:**  "
+                    f"Node draws {im:.0f} W ± {ist:.0f} W. "
+                    f"Set PCS dead-band = **{ist*2:.0f} W**. "
+                    f"BESS charges from solar during this window."
+                )
+
+        # ── RAMP-UP ───────────────────────────────────────────────────────────
+        with ph2:
+            st.markdown("#### 📈 Ramp-up — job starts, power rises")
+            pw_ru = pcs_pw[pcs_ri:pcs_re]
+            t_ru  = pcs_t[pcs_ri:pcs_re] - pcs_t[pcs_ri]
+            if len(pw_ru)<4:
+                st.warning("Ramp-up too short. Adjust plateau threshold.")
+            else:
+                dp_ru=np.gradient(pw_ru,pcs_dt)
+                dp95=float(np.percentile(np.abs(dp_ru),95))
+                rk1,rk2,rk3,rk4=st.columns(4)
+                rk1.metric("Duration",      f"{pcs_ru_dur:.1f} s")
+                rk2.metric("Power gained",  f"{pcs_pk-pcs_idl:.0f} W")
+                rk3.metric("Mean dP/dt",    f"{pcs_ru_rate:.1f} W/s")
+                rk4.metric("95th dP/dt",    f"{dp95:.1f} W/s")
+                r1,r2=st.columns(2)
+                with r1:
+                    ext_s=max(0,pcs_ri-int(15/pcs_dt))
+                    ext_e=min(len(pcs_pw),pcs_re+int(10/pcs_dt))
+                    figRU=go.Figure()
+                    figRU.add_trace(go.Scatter(
+                        x=_ds(pcs_t[ext_s:ext_e]-pcs_t[ext_s]),
+                        y=_ds(pcs_pw[ext_s:ext_e]),
+                        mode="lines",line=dict(color="#ef4444",width=1.8),
+                        fill="tozeroy",fillcolor="rgba(239,68,68,0.10)"))
+                    figRU.add_hline(y=pcs_idl,line_dash="dot",line_color="#6b7280",
+                                    annotation_text=f"Idle {pcs_idl:.0f}W",annotation_position="right")
+                    figRU.add_hline(y=pcs_pk,line_dash="dash",line_color="#ef4444",
+                                    annotation_text=f"Peak {pcs_pk:.0f}W",annotation_position="right")
+                    figRU.update_layout(xaxis_title="Time (s)",yaxis_title="W",
+                        height=280,hovermode="x unified",
+                        margin=dict(l=60,r=120,t=30,b=50))
+                    st.plotly_chart(figRU,use_container_width=True)
+                with r2:
+                    figRUd=go.Figure()
+                    figRUd.add_trace(go.Scatter(x=_ds(t_ru),y=_ds(dp_ru),
+                        mode="lines",line=dict(color="#f59e0b",width=1.2),
+                        fill="tozeroy",fillcolor="rgba(245,158,11,0.10)"))
+                    figRUd.add_hline(y=dp95,line_dash="dash",line_color="#ef4444",
+                                     annotation_text=f"95th {dp95:.1f} W/s",
+                                     annotation_position="right")
+                    figRUd.update_layout(xaxis_title="Time (s)",yaxis_title="dP/dt (W/s)",
+                        height=280,hovermode="x unified",
+                        margin=dict(l=60,r=120,t=30,b=50))
+                    st.plotly_chart(figRUd,use_container_width=True)
+                st.warning(
+                    f"**PCS — ramp-up:** "
+                    f"+{pcs_pk-pcs_idl:.0f} W in {pcs_ru_dur:.1f}s = {pcs_ru_rate:.1f} W/s. "
+                    f"PCS must discharge to full power in **< 100 ms**."
+                )
+
+        # ── OPERATIONAL ───────────────────────────────────────────────────────
+        with ph3:
+            st.markdown("#### ⚡ Operational plateau — token generation rhythm")
+            pw_pl = pcs_pw[pcs_re:pcs_pe]
+            t_pl  = pcs_t[pcs_re:pcs_pe] - pcs_t[pcs_re]
+            if len(pw_pl)<32:
+                st.warning("Plateau too short.")
+            else:
+                dp_pl   = np.gradient(pw_pl,pcs_dt)
+                dp95_pl = float(np.percentile(np.abs(dp_pl),95))
+                lf_pl   = float(pw_pl.mean()/pcs_pk*100)
+                ok1,ok2,ok3,ok4=st.columns(4)
+                ok1.metric("Plateau duration", f"{len(pw_pl)*pcs_dt:.0f} s")
+                ok2.metric("Mean power",       f"{pcs_mn:.0f} W")
+                ok3.metric("Load factor",      f"{lf_pl:.1f} %")
+                ok4.metric("95th dP/dt",       f"{dp95_pl:.1f} W/s")
+                zoom_opts=sorted(set([z for z in [30,60,120,300] if z<len(pw_pl)*pcs_dt]+[int(min(len(pw_pl)*pcs_dt,300))]))
+                op1,op2=st.columns([2,1])
+                with op1:
+                    zoom=st.select_slider("Zoom (s)",zoom_opts,value=min(120,zoom_opts[-1]),key="pcs_zoom")
+                with op2:
+                    rw=st.slider("Rolling avg (steps)",1,100,25,key="pcs_rw")
+                zn=int(zoom/pcs_dt)
+                pw_z=pw_pl[:zn]; t_z=t_pl[:zn]
+                roll=pd.Series(pw_z).rolling(rw,center=True).mean().values
+                figOP=go.Figure()
+                figOP.add_trace(go.Scatter(x=_ds(t_z),y=_ds(pw_z),mode="lines",
+                    name="Raw",line=dict(color="rgba(245,158,11,0.5)",width=0.8)))
+                figOP.add_trace(go.Scatter(x=_ds(t_z),y=_ds(roll),mode="lines",
+                    name=f"Mean ({rw*pcs_dt:.1f}s)",
+                    line=dict(color="#f59e0b",width=2.5)))
+                figOP.add_hline(y=pcs_mn,line_dash="dot",line_color="#1D9E75",
+                                annotation_text=f"Mean {pcs_mn:.0f}W",annotation_position="right")
+                figOP.update_layout(xaxis_title="Time (s)",yaxis_title="W",
+                    height=300,hovermode="x unified",
+                    legend=dict(orientation="h",y=1.12,font=dict(size=10)),
+                    margin=dict(l=60,r=120,t=30,b=50))
+                st.plotly_chart(figOP,use_container_width=True)
+                res_op=_fft_seg(pw_pl,pcs_dt)
+                if res_op:
+                    fq_op,am_op,df_op,dT_op=res_op
+                    figOPf=go.Figure()
+                    figOPf.add_trace(go.Scatter(x=fq_op,y=am_op,mode="lines",
+                        line=dict(color="#8b5cf6",width=1.5),
+                        fill="tozeroy",fillcolor="rgba(139,92,246,0.08)"))
+                    for fr,fl in [(0.01,"Ramp"),(0.1,"Step"),(1.0,"GPU")]:
+                        figOPf.add_vline(x=fr,line_dash="dot",
+                                         line_color="rgba(200,200,200,0.3)",
+                                         annotation_text=fl,annotation_font_size=9,
+                                         annotation_position="top right")
+                    figOPf.add_vline(x=df_op,line_dash="dash",line_color="#f59e0b",
+                                     annotation_text=f"Dom {df_op:.4f}Hz={dT_op:.1f}s",
+                                     annotation_position="top left")
+                    figOPf.update_layout(
+                        title=f"FFT — training step every {dT_op:.1f}s ({df_op:.4f} Hz)",
+                        xaxis_title="Hz",yaxis_title="Amplitude (W)",
+                        xaxis_type="log",xaxis=dict(range=[-3,0.4]),
+                        height=260,margin=dict(l=60,r=15,t=50,b=50))
+                    st.plotly_chart(figOPf,use_container_width=True)
+                    st.info(
+                        f"**Token generation frequency = {df_op:.4f} Hz** "
+                        f"(one training step every {dT_op:.1f}s). "
+                        f"PCS must continuously track ±{dp95_pl:.1f} W/s at this rhythm."
+                    )
+
+        # ── RAMP-DOWN ─────────────────────────────────────────────────────────
+        with ph4:
+            st.markdown("#### 📉 Ramp-down — job ends, power drops (WORST CASE)")
+            pw_rd = pcs_pw[pcs_pe:pcs_rde]
+            t_rd  = pcs_t[pcs_pe:pcs_rde] - pcs_t[pcs_pe]
+            if len(pw_rd)<4:
+                st.warning("Ramp-down too short. Adjust thresholds.")
+            else:
+                dp_rd   = np.gradient(pw_rd,pcs_dt)
+                dp95_rd = float(np.percentile(np.abs(dp_rd),95))
+                asym    = pcs_rd_rate/max(pcs_ru_rate,1)
+                dk1,dk2,dk3,dk4=st.columns(4)
+                dk1.metric("Duration",       f"{pcs_rd_dur:.1f} s")
+                dk2.metric("Power shed",     f"{pcs_pk-pcs_idl:.0f} W")
+                dk3.metric("Mean dP/dt",     f"{pcs_rd_rate:.1f} W/s")
+                dk4.metric("95th dP/dt",     f"{dp95_rd:.1f} W/s",
+                           delta=f"{asym:.1f}× faster than ramp-up",
+                           delta_color="inverse")
+                d1,d2=st.columns(2)
+                with d1:
+                    ext_s=max(0,pcs_pe-int(10/pcs_dt))
+                    ext_e=min(len(pcs_pw),pcs_rde+int(20/pcs_dt))
+                    figRD=go.Figure()
+                    figRD.add_trace(go.Scatter(
+                        x=_ds(pcs_t[ext_s:ext_e]-pcs_t[ext_s]),
+                        y=_ds(pcs_pw[ext_s:ext_e]),
+                        mode="lines",line=dict(color="#3b82f6",width=1.8),
+                        fill="tozeroy",fillcolor="rgba(59,130,246,0.10)"))
+                    figRD.add_hline(y=pcs_idl,line_dash="dot",line_color="#6b7280",
+                                    annotation_text=f"Idle {pcs_idl:.0f}W",annotation_position="right")
+                    figRD.update_layout(xaxis_title="Time (s)",yaxis_title="W",
+                        height=280,hovermode="x unified",
+                        margin=dict(l=60,r=120,t=30,b=50))
+                    st.plotly_chart(figRD,use_container_width=True)
+                with d2:
+                    figRDd=go.Figure()
+                    figRDd.add_trace(go.Scatter(x=_ds(t_rd),y=_ds(dp_rd),
+                        mode="lines",line=dict(color="#f38ba8",width=1.2),
+                        fill="tozeroy",fillcolor="rgba(243,139,168,0.10)"))
+                    figRDd.add_hline(y=-dp95_rd,line_dash="dash",line_color="#3b82f6",
+                                     annotation_text=f"95th -{dp95_rd:.1f} W/s",
+                                     annotation_position="right")
+                    figRDd.update_layout(xaxis_title="Time (s)",yaxis_title="dP/dt (W/s)",
+                        height=280,hovermode="x unified",
+                        margin=dict(l=60,r=130,t=30,b=50))
+                    st.plotly_chart(figRDd,use_container_width=True)
+                # normalised overlay
+                if len(pw_ru)>1 and len(pw_rd)>1:
+                    ru_n=(pcs_pw[pcs_ri:pcs_re]-pcs_pw[pcs_ri])/max(pcs_pw[pcs_re-1]-pcs_pw[pcs_ri],1.)
+                    rd_n=(pcs_pw[pcs_pe]-pcs_pw[pcs_pe:pcs_rde])/max(pcs_pw[pcs_pe]-pcs_pw[pcs_rde-1],1.)
+                    figOv=go.Figure()
+                    figOv.add_trace(go.Scatter(
+                        x=np.arange(len(ru_n))*pcs_dt,y=_ds(ru_n,len(ru_n)),
+                        mode="lines",name=f"Ramp-up ({pcs_ru_dur:.1f}s)",
+                        line=dict(color="#ef4444",width=2.5)))
+                    figOv.add_trace(go.Scatter(
+                        x=np.arange(len(rd_n))*pcs_dt,y=_ds(rd_n,len(rd_n)),
+                        mode="lines",name=f"Ramp-down ({pcs_rd_dur:.1f}s)",
+                        line=dict(color="#3b82f6",width=2.5)))
+                    figOv.update_layout(
+                        title=f"Ramp-down is {asym:.1f}× faster → size PCS for this",
+                        xaxis_title="Time from event (s)",
+                        yaxis_title="Normalised (0=idle, 1=peak)",
+                        yaxis=dict(range=[-0.05,1.1]),height=280,
+                        legend=dict(orientation="h",y=1.12,font=dict(size=10)),
+                        margin=dict(l=60,r=15,t=55,b=50))
+                    st.plotly_chart(figOv,use_container_width=True)
+                st.error(
+                    f"**PCS worst case — ramp-down:** "
+                    f"-{pcs_pk-pcs_idl:.0f} W in {pcs_rd_dur:.1f}s = {pcs_rd_rate:.1f} W/s. "
+                    f"PCS must reverse discharge→charge in **< 100 ms**. "
+                    f"This is **{asym:.1f}× faster** than ramp-up. "
+                    f"**Size your PCS inverter for this number.**"
+                )
+
+        # ── PCS SPECIFICATION ─────────────────────────────────────────────────
+        with ph5:
+            st.markdown("#### 🔧 PCS specification — from this single node")
+            dp95_all  = float(np.percentile(np.abs(pcs_dpdt),95))
+            dp_plat95 = float(np.percentile(np.abs(pcs_dpdt[pcs_re:pcs_pe]),95)) if pcs_pe>pcs_re else 0.
+            dp_up95   = float(np.percentile(np.abs(pcs_dpdt[pcs_ri:pcs_re]),95)) if pcs_re>pcs_ri else 0.
+            dp_dn95   = float(np.percentile(np.abs(pcs_dpdt[pcs_pe:pcs_rde]),95)) if pcs_rde>pcs_pe else 0.
+            bw_min    = max(dp_plat95,dp_up95,dp_dn95)*10
+            pcs_pwr   = (pcs_pk-pcs_idl)*0.80
+            pcs_e15   = pcs_pwr*0.25/1000
+            pcs_e1h   = pcs_pwr*1.00/1000
+            cr15      = pcs_pwr/1000/max(pcs_e15,1e-6)
+            fac_n=156; fac_pue=1.20
+
+            sp1,sp2=st.columns(2)
+            with sp1:
+                st.markdown("**Single node PCS spec**")
+                for k,v in [
+                    ("PCS POWER",              ""),
+                    ("PCS power rating",       f"{pcs_pwr:.0f} W = {pcs_pwr/1000:.2f} kW"),
+                    ("4-quadrant operation",    "Yes — charge AND discharge"),
+                    ("Response time",           "< 100 ms"),
+                    ("RAMP RATES",             ""),
+                    ("Discharge rate (ramp-up)",f"≥ {dp_up95:.0f} W/s"),
+                    ("Charge rate (ramp-down)", f"≥ {dp_dn95:.0f} W/s ← WORST CASE"),
+                    ("Inverter bandwidth",       f"≥ {bw_min:.0f} W/s (10× rule)"),
+                    ("ENERGY",                 ""),
+                    ("15 min firming",          f"{pcs_e15:.3f} kWh → C-rate {cr15:.2f}C"),
+                    ("Chemistry",               "LFP high-power" if cr15>0.5 else "LFP standard"),
+                    ("FREQUENCY",              ""),
+                    ("Idle dP/dt",              f"~{float(np.abs(pcs_dpdt[:pcs_ri]).mean()) if pcs_ri>0 else 0:.1f} W/s (dead-band)"),
+                    ("Plateau 95th dP/dt",      f"{dp_plat95:.1f} W/s"),
+                    ("Ramp-up 95th dP/dt",      f"{dp_up95:.1f} W/s"),
+                    ("Ramp-down 95th dP/dt",    f"{dp_dn95:.1f} W/s ← design for this"),
+                ]:
+                    if v == "":
+                        st.markdown(f"<div style='margin:8px 0 2px;font-size:10px;"
+                                    f"color:#888;text-transform:uppercase;"
+                                    f"letter-spacing:1px'>{k}</div>",
+                                    unsafe_allow_html=True)
+                    else:
+                        ca,cb=st.columns([5,4])
+                        ca.markdown(f"<span style='color:gray;font-size:12px'>{k}</span>",
+                                    unsafe_allow_html=True)
+                        cb.markdown(f"**{v}**")
+
+            with sp2:
+                st.markdown(f"**Scaled to {fac_n} nodes × PUE {fac_pue}**")
+                for k,v in [
+                    ("FACILITY LEVEL",         ""),
+                    ("PCS power rating",        f"{pcs_pwr*fac_n*fac_pue/1000:.1f} kW = {pcs_pwr*fac_n*fac_pue/1e6:.2f} MW"),
+                    ("15 min energy",           f"{pcs_e15*fac_n:.1f} kWh"),
+                    ("1 hr energy",             f"{pcs_e1h*fac_n:.1f} kWh = {pcs_e1h*fac_n/1000:.2f} MWh"),
+                    ("Charge ramp rate",        f"{dp_dn95*fac_n*fac_pue/1000:.1f} kW/s"),
+                    ("Inverter bandwidth",       f"{bw_min*fac_n*fac_pue/1000:.1f} kW/s"),
+                    ("PCS CONTROL",            ""),
+                    ("Job-start response",       "< 100 ms"),
+                    ("Discharge→charge reversal","< 100 ms (4-quadrant)"),
+                    ("Pre-charge strategy",      "Charge to 90% SoC before each job"),
+                    ("Scheduler integration",    "Get job-start signal 30s in advance"),
+                ]:
+                    if v == "":
+                        st.markdown(f"<div style='margin:8px 0 2px;font-size:10px;"
+                                    f"color:#888;text-transform:uppercase;"
+                                    f"letter-spacing:1px'>{k}</div>",
+                                    unsafe_allow_html=True)
+                    else:
+                        ca,cb=st.columns([5,4])
+                        ca.markdown(f"<span style='color:gray;font-size:12px'>{k}</span>",
+                                    unsafe_allow_html=True)
+                        cb.markdown(f"**{v}**")
+
+                # dP/dt bar chart
+                figSp=go.Figure()
+                figSp.add_trace(go.Bar(
+                    x=["Idle","Ramp-up 95th","Plateau 95th","Ramp-down 95th"],
+                    y=[float(np.abs(pcs_dpdt[:pcs_ri]).mean()) if pcs_ri>0 else 0,
+                       dp_up95, dp_plat95, dp_dn95],
+                    marker_color=["#6b7280","#ef4444","#f59e0b","#3b82f6"],
+                    text=[f"{v:.1f}" for v in [
+                        float(np.abs(pcs_dpdt[:pcs_ri]).mean()) if pcs_ri>0 else 0,
+                        dp_up95,dp_plat95,dp_dn95]],
+                    textposition="outside",
+                ))
+                figSp.update_layout(
+                    title="|dP/dt| per phase → ramp-down = worst case",
+                    yaxis_title="W/s",height=260,showlegend=False,
+                    margin=dict(l=60,r=15,t=50,b=60))
+                st.plotly_chart(figSp,use_container_width=True)
+
+            st.success(
+                f"**Conclusion — {pcs_nn} nodes, {pcs_mdl}:**  "
+                f"Idle {pcs_idl:.0f}W (~0 W/s) | "
+                f"Ramp-up +{pcs_pk-pcs_idl:.0f}W in {pcs_ru_dur:.1f}s ({pcs_ru_rate:.0f} W/s) | "
+                f"Plateau {pcs_mn:.0f}W ±{pcs_std:.0f}W | "
+                f"Ramp-down -{pcs_pk-pcs_idl:.0f}W in {pcs_rd_dur:.1f}s ({pcs_rd_rate:.0f} W/s) ← worst case | "
+                f"**Facility PCS = {pcs_pwr*fac_n*fac_pue/1000:.1f} kW**"
+            )
 
     # ════════════════════════════════════════════════════════════════════════
     # TAB 0 — NODE OVERVIEW  (primary engineering view)
