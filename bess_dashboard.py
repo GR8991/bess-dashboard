@@ -30,14 +30,15 @@ from plotly.subplots import make_subplots
 
 # ── streamlit (must come before any st.* call) ───────────────────────────────
 import streamlit as st
-
+from auth import require_authorized_user
 st.set_page_config(
     page_title="BESS Dashboard — NLR GenAI",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
+# ── AUTHENTICATION ───────────────────────────────────────────────────────────
+user_email = require_authorized_user()
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE — initialise every key with a safe default
 # ─────────────────────────────────────────────────────────────────────────────
