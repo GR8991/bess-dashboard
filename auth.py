@@ -9,7 +9,7 @@ def require_authorized_user():
         st.session_state.authorized_email = None
 
     if st.session_state.authorized_email is None:
-        st.title("AIDC profiel")
+        st.title("GR_AIDC profile")
         st.write("Enter your authorized company email to continue.")
 
         with st.form("email_login"):
