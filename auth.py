@@ -34,3 +34,17 @@ def require_authorized_user():
         st.stop()
 
     return st.session_state.authorized_email
+
+def show_logout_button():
+    """Display a logout button for the authorized user."""
+
+    with st.sidebar:
+        st.divider()
+        st.caption(
+            f"Signed in as: {st.session_state.get('authorized_email', '')}"
+        )
+
+        if st.button("Logout", use_container_width=True):
+            st.session_state.authorized_email = None
+            st.rerun()
+
