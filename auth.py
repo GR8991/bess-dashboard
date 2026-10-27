@@ -3,45 +3,34 @@ import streamlit as st
 
 
 def require_authorized_user():
-    """Require a verified identity and explicit email authorization."""
+    """Allow dashboard access only for emails listed in Streamlit Secrets."""
 
-    if not st.user.is_logged_in:
+    if "authorized_email" not in st.session_state:
+        st.session_state.authorized_email = None
+
+    if st.session_state.authorized_email is None:
         st.title("Wind-BESS Intelligence")
-        st.write("Sign in using an approved account.")
+        st.write("Enter your authorized company email to continue.")
 
-        col1, col2 = st.columns(2)
+        with st.form("email_login"):
+            email = st.text_input("Email address")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
 
-        with col1:
-            if st.button("Sign in with Google", use_container_width=True):
-                st.login("google")
+        if submitted:
+            email = email.strip().casefold()
 
-        with col2:
-            if st.button("Sign in with Microsoft", use_container_width=True):
-                st.login("microsoft")
+            allowed_emails = {
+                item.strip().casefold()
+                for item in st.secrets["access"]["allowed_emails"]
+                if isinstance(item, str) and item.strip()
+            }
+
+            if email and email in allowed_emails:
+                st.session_state.authorized_email = email
+                st.rerun()
+            else:
+                st.error("Access denied. This email is not authorized.")
 
         st.stop()
 
-    email = st.user.get("email", "")
-    verified = st.user.get("email_verified", None)
-
-    if not isinstance(email, str) or not email.strip():
-        st.error("No valid email identity was provided.")
-        st.stop()
-
-    if verified is not True:
-        st.error("A verified email identity is required.")
-        st.stop()
-
-    email = email.strip().casefold()
-
-    allowed = {
-        item.strip().casefold()
-        for item in st.secrets["access"]["allowed_emails"]
-        if isinstance(item, str) and item.strip()
-    }
-
-    if email not in allowed:
-        st.error("Access denied. Contact the application administrator.")
-        st.stop()
-
-    return email
+    return st.session_state.authorized_email
